@@ -4,7 +4,7 @@ export type ExportFormat = "json" | "yaml" | "toml" | "xml";
 
 export type OutputMode = "values" | "schema";
 
-export type CanvasView = "form" | "structure";
+export type CanvasView = "form" | "structure" | "workflow";
 
 export type ImportMode = "values" | "schema";
 
@@ -57,6 +57,31 @@ export interface ValidationReport {
   valid: boolean;
   errors: string[];
   warnings: string[];
+}
+
+export type WorkflowTrigger = "manual" | "push" | "schedule";
+
+export type WorkflowStepKind = "run" | "uses" | "approval";
+
+export type WorkflowExportTarget = "portable" | "github-actions";
+
+export interface WorkflowStep {
+  id: string;
+  name: string;
+  kind: WorkflowStepKind;
+  command: string;
+  uses: string;
+  needs: string[];
+  env: Record<string, string>;
+}
+
+export interface WorkflowModel {
+  version: string;
+  name: string;
+  trigger: WorkflowTrigger;
+  schedule: string;
+  runsOn: string;
+  steps: WorkflowStep[];
 }
 
 export const exportFormats: ExportFormat[] = ["json", "yaml", "toml", "xml"];

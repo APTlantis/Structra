@@ -1,30 +1,42 @@
-import type { BuilderNode, DocumentModel, FieldDataType, InternalNode, JsonValue } from "./types";
+import type { BuilderNode, DocumentModel, FieldDataType, InternalNode, JsonValue, WorkflowModel } from "./types";
+import { normalizeWorkflow } from "./workflowFactory";
 
 export interface ProjectFile {
   version: string;
   document: DocumentModel;
   internalNodes: InternalNode[];
+  workflow?: WorkflowModel;
 }
 
-export function createProjectFile(document: DocumentModel): ProjectFile {
+export interface ProjectLoadResult {
+  document: DocumentModel;
+  workflow?: WorkflowModel;
+}
+
+export function createProjectFile(document: DocumentModel, workflow?: WorkflowModel): ProjectFile {
   return {
     version: "1.0.0",
     document,
     internalNodes: buildInternalNodes(document),
+    ...(workflow ? { workflow } : {}),
   };
 }
 
-export function readProjectFile(value: unknown): DocumentModel | null {
+export function readProjectFile(value: unknown): ProjectLoadResult | null {
   if (!value || typeof value !== "object") {
     return null;
   }
 
   const maybeProject = value as Partial<ProjectFile>;
   if (isDocumentModel(maybeProject.document)) {
-    return maybeProject.document;
+    const workflow = normalizeWorkflow(maybeProject.workflow);
+    return {
+      document: maybeProject.document,
+      ...(workflow ? { workflow } : {}),
+    };
   }
 
-  return isDocumentModel(value) ? value : null;
+  return isDocumentModel(value) ? { document: value } : null;
 }
 
 export function buildInternalNodes(document: DocumentModel): InternalNode[] {

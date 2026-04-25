@@ -31,6 +31,14 @@ import { createDocumentFromJson, createDocumentFromJsonSchema, templateDocuments
 import { buildInternalNodes, createProjectFile, readProjectFile } from "./internalModel";
 import { generateOutput, validateDocument } from "./transformClient";
 import { selectNodeById, useBuilderStore } from "./store";
+import {
+  createWorkflowStep,
+  envFromText,
+  envToText,
+  initialWorkflow,
+  workflowExportFilename,
+  workflowToYaml,
+} from "./workflowFactory";
 import type {
   BuilderNode,
   CanvasView,
@@ -43,6 +51,10 @@ import type {
   NodeType,
   OutputMode,
   ValidationReport,
+  WorkflowExportTarget,
+  WorkflowModel,
+  WorkflowStep,
+  WorkflowStepKind,
 } from "./types";
 import { exportFormats, outputModes } from "./types";
 
@@ -75,6 +87,7 @@ const modeLabels: Record<OutputMode, string> = {
 const viewLabels: Record<CanvasView, string> = {
   form: "Form View",
   structure: "Structure View",
+  workflow: "Workflow",
 };
 
 const savedTemplateKey = "sdb.savedTemplates.v1";
@@ -111,11 +124,19 @@ function App() {
   const [previousGenerated, setPreviousGenerated] = useState<GeneratedOutput | null>(null);
   const [validation, setValidation] = useState<ValidationReport | null>(null);
   const [status, setStatus] = useState("Ready");
+  const [workflow, setWorkflow] = useState<WorkflowModel>(initialWorkflow);
+  const [workflowTarget, setWorkflowTarget] = useState<WorkflowExportTarget>("portable");
+  const [selectedWorkflowStepId, setSelectedWorkflowStepId] = useState(initialWorkflow.steps[0]?.id ?? null);
   const projectInputRef = useRef<HTMLInputElement | null>(null);
 
   const selectedNode = useMemo(() => selectNodeById(document, selectedNodeId), [document, selectedNodeId]);
+  const selectedWorkflowStep = useMemo(
+    () => workflow.steps.find((step) => step.id === selectedWorkflowStepId) ?? null,
+    [selectedWorkflowStepId, workflow.steps],
+  );
   const pathSuggestions = useMemo(() => collectBindingPaths(document), [document]);
   const internalNodes = useMemo(() => buildInternalNodes(document), [document]);
+  const workflowYaml = useMemo(() => workflowToYaml(workflow, workflowTarget), [workflow, workflowTarget]);
 
   useEffect(() => {
     documentElement().classList.toggle("dark", theme === "dark");
@@ -220,7 +241,7 @@ function App() {
   };
 
   const saveProject = () => {
-    const project = createProjectFile(document);
+    const project = createProjectFile(document, workflow);
     const blob = new Blob([JSON.stringify(project, null, 2)], { type: "application/json;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const anchor = window.document.createElement("a");
@@ -236,17 +257,79 @@ function App() {
   const loadProjectFile = async (file: File) => {
     try {
       const parsed = JSON.parse(await file.text()) as unknown;
-      const nextDocument = readProjectFile(parsed);
-      if (!nextDocument) {
+      const project = readProjectFile(parsed);
+      if (!project) {
         setStatus("Invalid project file");
         return;
       }
-      replaceDocument(nextDocument);
-      setCanvasView("structure");
+      replaceDocument(project.document);
+      if (project.workflow) {
+        setWorkflow(project.workflow);
+        setSelectedWorkflowStepId(project.workflow.steps[0]?.id ?? null);
+      }
+      setCanvasView(project.workflow ? "workflow" : "structure");
       setStatus("Project loaded");
     } catch {
       setStatus("Invalid project file");
     }
+  };
+
+  const addWorkflowStep = (kind: WorkflowStepKind) => {
+    const step = createWorkflowStep(kind);
+    setWorkflow((current) => ({ ...current, steps: [...current.steps, step] }));
+    setSelectedWorkflowStepId(step.id);
+    setStatus("Workflow step added");
+  };
+
+  const updateWorkflow = (patch: Partial<WorkflowModel>) => {
+    setWorkflow((current) => ({ ...current, ...patch }));
+  };
+
+  const updateWorkflowStep = (id: string, patch: Partial<WorkflowStep>) => {
+    setWorkflow((current) => ({
+      ...current,
+      steps: current.steps.map((step) => (step.id === id ? { ...step, ...patch, id: step.id } : step)),
+    }));
+  };
+
+  const deleteWorkflowStep = (id: string) => {
+    setWorkflow((current) => {
+      const steps = current.steps.filter((step) => step.id !== id);
+      setSelectedWorkflowStepId(steps[0]?.id ?? null);
+      return { ...current, steps };
+    });
+    setStatus("Workflow step deleted");
+  };
+
+  const moveWorkflowStep = (id: string, direction: -1 | 1) => {
+    setWorkflow((current) => {
+      const index = current.steps.findIndex((step) => step.id === id);
+      const target = index + direction;
+      if (index < 0 || target < 0 || target >= current.steps.length) {
+        return current;
+      }
+      const steps = [...current.steps];
+      [steps[index], steps[target]] = [steps[target], steps[index]];
+      return { ...current, steps };
+    });
+  };
+
+  const copyWorkflowYaml = async () => {
+    await navigator.clipboard.writeText(workflowYaml);
+    setStatus("Workflow YAML copied");
+  };
+
+  const downloadWorkflowYaml = () => {
+    const blob = new Blob([workflowYaml], { type: "text/yaml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = window.document.createElement("a");
+    anchor.href = url;
+    anchor.download = workflowExportFilename(workflow, workflowTarget);
+    window.document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    setStatus("Workflow YAML downloaded");
   };
 
   return (
@@ -355,20 +438,31 @@ function App() {
                 <SegmentedControl
                   ariaLabel="Canvas view"
                   value={canvasView}
-                  options={(["form", "structure"] as CanvasView[]).map((view) => ({
+                  options={(["form", "structure", "workflow"] as CanvasView[]).map((view) => ({
                     value: view,
                     label: viewLabels[view],
                   }))}
                   onChange={setCanvasView}
                 />
-                <button
-                  className="inline-flex h-9 items-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800"
-                  type="button"
-                  onClick={() => addNode("text")}
-                >
-                  <Plus size={16} aria-hidden="true" />
-                  Add field
-                </button>
+                {canvasView === "workflow" ? (
+                  <button
+                    className="inline-flex h-9 items-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800"
+                    type="button"
+                    onClick={() => addWorkflowStep("run")}
+                  >
+                    <Plus size={16} aria-hidden="true" />
+                    Add step
+                  </button>
+                ) : (
+                  <button
+                    className="inline-flex h-9 items-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800"
+                    type="button"
+                    onClick={() => addNode("text")}
+                  >
+                    <Plus size={16} aria-hidden="true" />
+                    Add field
+                  </button>
+                )}
               </div>
             </div>
 
@@ -393,31 +487,62 @@ function App() {
                   </div>
                 )}
               </div>
-            ) : (
+            ) : canvasView === "structure" ? (
               <StructureView data={generated?.data ?? {}} internalNodes={internalNodes} mode={outputMode} />
+            ) : (
+              <WorkflowCanvas
+                workflow={workflow}
+                selectedStepId={selectedWorkflowStepId}
+                onAddStep={addWorkflowStep}
+                onDeleteStep={deleteWorkflowStep}
+                onMoveStep={moveWorkflowStep}
+                onSelectStep={setSelectedWorkflowStepId}
+                onUpdateStep={updateWorkflowStep}
+              />
             )}
           </div>
         </section>
 
         <aside className="grid border-t border-slate-200 bg-white lg:min-h-0 lg:border-l lg:border-t-0">
           <div className="grid lg:min-h-0 lg:grid-rows-[minmax(285px,0.95fr)_minmax(340px,1.05fr)]">
-            <InspectorPanel
-              selectedNode={selectedNode}
-              pathSuggestions={pathSuggestions}
-              onUpdate={updateNode}
-              onDelete={deleteNode}
-            />
-            <ExportPanel
-              activeFormat={activeFormat}
-              outputMode={outputMode}
-              generated={generated}
-              previousGenerated={previousGenerated}
-              validation={validation}
-              onCopy={copyOutput}
-              onDownload={downloadOutput}
-              onFormatChange={setActiveFormat}
-              onModeChange={setOutputMode}
-            />
+            {canvasView === "workflow" ? (
+              <>
+                <WorkflowInspector
+                  selectedStep={selectedWorkflowStep}
+                  workflow={workflow}
+                  onDeleteStep={deleteWorkflowStep}
+                  onUpdateStep={updateWorkflowStep}
+                  onUpdateWorkflow={updateWorkflow}
+                />
+                <WorkflowExportPanel
+                  content={workflowYaml}
+                  target={workflowTarget}
+                  onCopy={copyWorkflowYaml}
+                  onDownload={downloadWorkflowYaml}
+                  onTargetChange={setWorkflowTarget}
+                />
+              </>
+            ) : (
+              <>
+                <InspectorPanel
+                  selectedNode={selectedNode}
+                  pathSuggestions={pathSuggestions}
+                  onUpdate={updateNode}
+                  onDelete={deleteNode}
+                />
+                <ExportPanel
+                  activeFormat={activeFormat}
+                  outputMode={outputMode}
+                  generated={generated}
+                  previousGenerated={previousGenerated}
+                  validation={validation}
+                  onCopy={copyOutput}
+                  onDownload={downloadOutput}
+                  onFormatChange={setActiveFormat}
+                  onModeChange={setOutputMode}
+                />
+              </>
+            )}
           </div>
         </aside>
       </div>
@@ -540,6 +665,159 @@ function EmptyCanvas() {
       <SquareDashedMousePointer className="mb-3 text-slate-400" size={30} aria-hidden="true" />
       <p className="text-sm font-medium text-slate-700">Drop a component here</p>
       <p className="mt-1 max-w-64 text-xs text-slate-500">Start with text, number, checkbox, select, object, or grid.</p>
+    </div>
+  );
+}
+
+function WorkflowCanvas({
+  workflow,
+  selectedStepId,
+  onAddStep,
+  onDeleteStep,
+  onMoveStep,
+  onSelectStep,
+  onUpdateStep,
+}: {
+  workflow: WorkflowModel;
+  selectedStepId: string | null;
+  onAddStep: (kind: WorkflowStepKind) => void;
+  onDeleteStep: (id: string) => void;
+  onMoveStep: (id: string, direction: -1 | 1) => void;
+  onSelectStep: (id: string) => void;
+  onUpdateStep: (id: string, patch: Partial<WorkflowStep>) => void;
+}) {
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+        <div>
+          <h3 className="text-sm font-semibold">{workflow.name}</h3>
+          <p className="text-xs text-slate-500">Build a portable YAML workflow from ordered, dependency-aware steps.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            className="h-8 rounded-md border border-slate-200 px-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+            type="button"
+            onClick={() => onAddStep("run")}
+          >
+            Run
+          </button>
+          <button
+            className="h-8 rounded-md border border-slate-200 px-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+            type="button"
+            onClick={() => onAddStep("uses")}
+          >
+            Uses
+          </button>
+          <button
+            className="h-8 rounded-md border border-slate-200 px-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+            type="button"
+            onClick={() => onAddStep("approval")}
+          >
+            Gate
+          </button>
+        </div>
+      </div>
+      <div className="grid gap-3 p-4">
+        {workflow.steps.map((step, index) => (
+          <WorkflowStepCard
+            key={step.id}
+            index={index}
+            selected={step.id === selectedStepId}
+            step={step}
+            onDelete={onDeleteStep}
+            onMove={onMoveStep}
+            onSelect={onSelectStep}
+            onUpdate={onUpdateStep}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function WorkflowStepCard({
+  index,
+  selected,
+  step,
+  onDelete,
+  onMove,
+  onSelect,
+  onUpdate,
+}: {
+  index: number;
+  selected: boolean;
+  step: WorkflowStep;
+  onDelete: (id: string) => void;
+  onMove: (id: string, direction: -1 | 1) => void;
+  onSelect: (id: string) => void;
+  onUpdate: (id: string, patch: Partial<WorkflowStep>) => void;
+}) {
+  return (
+    <div
+      className={`rounded-md border bg-white shadow-sm transition ${
+        selected ? "border-slate-950 ring-2 ring-slate-200" : "border-slate-200 hover:border-slate-400 hover:shadow-md"
+      }`}
+      role="button"
+      tabIndex={0}
+      onClick={() => onSelect(step.id)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          onSelect(step.id);
+        }
+      }}
+    >
+      <div className="flex items-center justify-between border-b border-slate-100 px-3 py-2">
+        <div className="min-w-0 flex-1 pr-2">
+          <div className="flex items-center gap-2">
+            <span className="flex size-6 shrink-0 items-center justify-center rounded bg-slate-100 text-xs font-semibold text-slate-600">
+              {index + 1}
+            </span>
+            <input
+              aria-label={`${step.name} workflow step name`}
+              className="h-7 min-w-0 flex-1 rounded bg-transparent text-sm font-semibold outline-none focus:bg-slate-50 focus:px-1"
+              value={step.name}
+              onClick={(event) => event.stopPropagation()}
+              onChange={(event) => onUpdate(step.id, { name: event.currentTarget.value })}
+            />
+          </div>
+          <div className="mt-1 flex min-w-0 items-center gap-1 font-mono text-[11px] text-slate-500">
+            <span className="rounded bg-slate-100 px-1 text-slate-700">{step.kind}</span>
+            {step.needs.length > 0 ? <span className="truncate">needs {step.needs.join(", ")}</span> : <span>no dependencies</span>}
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <IconButton label="Move up" icon={ArrowUp} onClick={() => onMove(step.id, -1)} />
+          <IconButton label="Move down" icon={ArrowDown} onClick={() => onMove(step.id, 1)} />
+          <IconButton label="Delete" icon={Trash2} onClick={() => onDelete(step.id)} />
+        </div>
+      </div>
+      <div className="grid gap-2 p-3">
+        <select
+          className="h-9 rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-400"
+          value={step.kind}
+          onClick={(event) => event.stopPropagation()}
+          onChange={(event) => onUpdate(step.id, { kind: event.currentTarget.value as WorkflowStepKind })}
+        >
+          <option value="run">run</option>
+          <option value="uses">uses</option>
+          <option value="approval">approval</option>
+        </select>
+        {step.kind === "uses" ? (
+          <input
+            className="h-9 rounded-md border border-slate-200 bg-white px-2 font-mono text-sm outline-none focus:border-slate-400"
+            value={step.uses}
+            onClick={(event) => event.stopPropagation()}
+            onChange={(event) => onUpdate(step.id, { uses: event.currentTarget.value })}
+          />
+        ) : (
+          <textarea
+            className="min-h-20 resize-y rounded-md border border-slate-200 bg-white px-2 py-2 font-mono text-sm outline-none focus:border-slate-400"
+            value={step.command}
+            onClick={(event) => event.stopPropagation()}
+            onChange={(event) => onUpdate(step.id, { command: event.currentTarget.value })}
+          />
+        )}
+      </div>
     </div>
   );
 }
@@ -850,6 +1128,19 @@ function TextControl({ label, value, onChange }: { label: string; value: string;
       <span className="text-xs font-medium text-slate-600">{label}</span>
       <input
         className="h-9 rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-400"
+        value={value}
+        onChange={(event) => onChange(event.currentTarget.value)}
+      />
+    </label>
+  );
+}
+
+function TextAreaControl({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  return (
+    <label className="grid gap-1.5">
+      <span className="text-xs font-medium text-slate-600">{label}</span>
+      <textarea
+        className="min-h-20 resize-y rounded-md border border-slate-200 bg-white px-2 py-2 text-sm outline-none focus:border-slate-400"
         value={value}
         onChange={(event) => onChange(event.currentTarget.value)}
       />
@@ -1200,6 +1491,157 @@ function StructureTree({ data, internalNodes }: { data: JsonValue; internalNodes
         </div>
       </div>
     </div>
+  );
+}
+
+function WorkflowInspector({
+  selectedStep,
+  workflow,
+  onDeleteStep,
+  onUpdateStep,
+  onUpdateWorkflow,
+}: {
+  selectedStep: WorkflowStep | null;
+  workflow: WorkflowModel;
+  onDeleteStep: (id: string) => void;
+  onUpdateStep: (id: string, patch: Partial<WorkflowStep>) => void;
+  onUpdateWorkflow: (patch: Partial<WorkflowModel>) => void;
+}) {
+  return (
+    <section className="min-h-0 overflow-auto border-b border-slate-200">
+      <PanelHeader title="Workflow" caption="Configure trigger, runtime, and selected step" />
+      <div className="grid gap-3 p-4">
+        <TextControl label="Name" value={workflow.name} onChange={(name) => onUpdateWorkflow({ name })} />
+        <div className="grid grid-cols-2 gap-2">
+          <label className="grid gap-1.5">
+            <span className="text-xs font-medium text-slate-600">Trigger</span>
+            <select
+              className="h-9 rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-400"
+              value={workflow.trigger}
+              onChange={(event) => onUpdateWorkflow({ trigger: event.currentTarget.value as WorkflowModel["trigger"] })}
+            >
+              <option value="manual">manual</option>
+              <option value="push">push</option>
+              <option value="schedule">schedule</option>
+            </select>
+          </label>
+          <TextControl label="Runs on" value={workflow.runsOn} onChange={(runsOn) => onUpdateWorkflow({ runsOn })} />
+        </div>
+        {workflow.trigger === "schedule" ? (
+          <TextControl label="Cron" value={workflow.schedule} onChange={(schedule) => onUpdateWorkflow({ schedule })} />
+        ) : null}
+
+        {selectedStep ? (
+          <div className="grid gap-3 rounded-md border border-slate-200 bg-slate-50 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <div className="text-xs font-semibold text-slate-700">Selected Step</div>
+                <div className="font-mono text-[11px] text-slate-500">{selectedStep.id}</div>
+              </div>
+              <button
+                className="inline-flex h-8 items-center gap-1.5 rounded-md border border-red-200 bg-white px-2 text-xs font-semibold text-red-700 hover:bg-red-50"
+                type="button"
+                onClick={() => onDeleteStep(selectedStep.id)}
+              >
+                <Trash2 size={13} aria-hidden="true" />
+                Delete
+              </button>
+            </div>
+            <TextControl label="Step name" value={selectedStep.name} onChange={(name) => onUpdateStep(selectedStep.id, { name })} />
+            <label className="grid gap-1.5">
+              <span className="text-xs font-medium text-slate-600">Kind</span>
+              <select
+                className="h-9 rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-400"
+                value={selectedStep.kind}
+                onChange={(event) => onUpdateStep(selectedStep.id, { kind: event.currentTarget.value as WorkflowStepKind })}
+              >
+                <option value="run">run</option>
+                <option value="uses">uses</option>
+                <option value="approval">approval</option>
+              </select>
+            </label>
+            {selectedStep.kind === "uses" ? (
+              <TextControl label="Uses" value={selectedStep.uses} onChange={(uses) => onUpdateStep(selectedStep.id, { uses })} />
+            ) : (
+              <TextAreaControl
+                label={selectedStep.kind === "approval" ? "Gate note" : "Command"}
+                value={selectedStep.command}
+                onChange={(command) => onUpdateStep(selectedStep.id, { command })}
+              />
+            )}
+            <TextControl
+              label="Needs"
+              value={selectedStep.needs.join(", ")}
+              onChange={(value) =>
+                onUpdateStep(selectedStep.id, {
+                  needs: value
+                    .split(",")
+                    .map((item) => item.trim())
+                    .filter(Boolean),
+                })
+              }
+            />
+            <TextAreaControl
+              label="Environment"
+              value={envToText(selectedStep.env)}
+              onChange={(value) => onUpdateStep(selectedStep.id, { env: envFromText(value) })}
+            />
+          </div>
+        ) : (
+          <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-500">Select a workflow step to edit it.</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function WorkflowExportPanel({
+  content,
+  target,
+  onCopy,
+  onDownload,
+  onTargetChange,
+}: {
+  content: string;
+  target: WorkflowExportTarget;
+  onCopy: () => void;
+  onDownload: () => void;
+  onTargetChange: (target: WorkflowExportTarget) => void;
+}) {
+  return (
+    <section className="grid min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto]">
+      <PanelHeader title="YAML" caption="Portable workflow definition" />
+      <div className="flex items-center justify-between gap-2 border-b border-slate-200 p-2">
+        <SegmentedControl
+          ariaLabel="Workflow export target"
+          value={target}
+          options={[
+            { value: "portable", label: "Generic" },
+            { value: "github-actions", label: "GitHub Actions" },
+          ]}
+          onChange={onTargetChange}
+        />
+      </div>
+      <OutputCode title={target === "github-actions" ? "github-actions.yml" : "workflow.yaml"} content={content} />
+      <div className="grid grid-cols-2 gap-2 border-t border-slate-200 p-3">
+        <button
+          className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white text-sm font-medium hover:bg-slate-50"
+          type="button"
+          onClick={onCopy}
+        >
+          <Clipboard size={15} aria-hidden="true" />
+          Copy
+        </button>
+        <button
+          className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-slate-950 text-sm font-medium text-white hover:bg-slate-800"
+          type="button"
+          onClick={onDownload}
+        >
+          <Download size={15} aria-hidden="true" />
+          Download
+        </button>
+      </div>
+    </section>
   );
 }
 
