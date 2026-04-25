@@ -6,6 +6,8 @@ export type OutputMode = "values" | "schema";
 
 export type CanvasView = "form" | "structure";
 
+export type ImportMode = "values" | "schema";
+
 export type FieldDataType = "string" | "number" | "boolean" | "object" | "array" | "custom";
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };

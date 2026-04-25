@@ -68,7 +68,11 @@ function normalizeDocument(document: DocumentModel): JsonValue {
 }
 
 function schemaDocument(document: DocumentModel): JsonValue {
-  const root: JsonValue = { type: "object", properties: {} };
+  const root: JsonValue = {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    type: "object",
+    properties: {},
+  };
   for (const node of document.nodes) {
     applySchemaNode(root, node, null);
   }

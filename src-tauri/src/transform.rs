@@ -199,6 +199,11 @@ fn normalize_document(document: &DocumentModel) -> Value {
 
 fn schema_document(document: &DocumentModel) -> Value {
     let mut root = Value::Object(Map::new());
+    insert_path(
+        &mut root,
+        &["$schema"],
+        Value::String("https://json-schema.org/draft/2020-12/schema".to_string()),
+    );
     insert_path(&mut root, &["type"], Value::String("object".to_string()));
     insert_path(&mut root, &["properties"], Value::Object(Map::new()));
 
@@ -693,6 +698,10 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(
+            output.data["$schema"],
+            json!("https://json-schema.org/draft/2020-12/schema")
+        );
         assert_eq!(output.data["type"], json!("object"));
         assert_eq!(output.data["properties"]["user"]["type"], json!("object"));
         assert_eq!(

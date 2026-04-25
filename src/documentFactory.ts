@@ -1,5 +1,15 @@
 import type { BuilderNode, DocumentModel, FieldDataType, JsonValue, NodeType } from "./types";
 
+type JsonRecord = Record<string, JsonValue>;
+
+interface SchemaInfo {
+  schema: JsonRecord;
+  baseType: FieldDataType;
+  nullable: boolean;
+  isArray: boolean;
+  itemSchema: JsonRecord | null;
+}
+
 const createId = () => `node-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 
 const titleCase = (value: string) =>
@@ -12,6 +22,25 @@ export function createDocumentFromJson(value: JsonValue, name = "Imported JSON")
   return {
     version: "1.0.0",
     nodes: objectEntries(value).map(([key, item]) => valueToNode(key, item)),
+    layout: {
+      kind: "grid",
+      columns: 2,
+    },
+    meta: {
+      name,
+      format: "ui-schema",
+    },
+  };
+}
+
+export function createDocumentFromJsonSchema(value: JsonValue, name = "Imported JSON Schema"): DocumentModel {
+  const schema = isRecord(value) ? value : {};
+  const properties = schemaProperties(schema);
+  return {
+    version: "1.0.0",
+    nodes: Object.entries(properties).map(([key, propertySchema]) =>
+      schemaToNode(key, asRecord(propertySchema), requiredKeys(schema).has(key)),
+    ),
     layout: {
       kind: "grid",
       columns: 2,
@@ -45,6 +74,7 @@ export function createNodeFromType(type: NodeType): BuilderNode {
       dataType,
       nullable: false,
       isArray: false,
+      required: false,
       ...(type === "select" ? { options: ["Option A", "Option B"] } : {}),
     },
   };
@@ -92,26 +122,12 @@ export const templateDocuments: Array<{ name: string; description: string; docum
   },
 ];
 
-function valueToNode(key: string, value: JsonValue): BuilderNode {
+function valueToNode(key: string, value: JsonValue, nullableHint = false): BuilderNode {
   if (Array.isArray(value)) {
-    const sample = value[0] ?? "";
-    const sampleType = inferDataType(sample);
-    return {
-      id: createId(),
-      type: sampleType === "object" ? "section" : nodeTypeForDataType(sampleType),
-      label: titleCase(key),
-      binding: key,
-      value: sampleType === "object" ? null : sample,
-      children: sampleType === "object" ? objectEntries(sample).map(([childKey, childValue]) => valueToNode(childKey, childValue)) : [],
-      props: {
-        dataType: sampleType,
-        nullable: value.some((item) => item === null),
-        isArray: true,
-      },
-    };
+    return arrayToNode(key, value, nullableHint);
   }
 
-  if (value && typeof value === "object") {
+  if (isRecord(value)) {
     return {
       id: createId(),
       type: "section",
@@ -121,8 +137,9 @@ function valueToNode(key: string, value: JsonValue): BuilderNode {
       children: objectEntries(value).map(([childKey, childValue]) => valueToNode(childKey, childValue)),
       props: {
         dataType: "object",
-        nullable: false,
+        nullable: nullableHint,
         isArray: false,
+        required: !nullableHint,
       },
     };
   }
@@ -133,29 +150,183 @@ function valueToNode(key: string, value: JsonValue): BuilderNode {
     type: nodeTypeForDataType(dataType),
     label: titleCase(key),
     binding: key,
-    value,
+    value: value ?? defaultValueForType(dataType),
     children: [],
     props: {
       dataType,
-      nullable: value === null,
+      nullable: nullableHint || value === null,
       isArray: false,
+      required: !nullableHint,
     },
   };
 }
 
-function objectEntries(value: JsonValue): Array<[string, JsonValue]> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return [];
+function arrayToNode(key: string, value: JsonValue[], nullableHint: boolean): BuilderNode {
+  const concreteItems = value.filter((item) => item !== null);
+  const hasNull = value.length !== concreteItems.length;
+  const objectItems = concreteItems.filter(isRecord);
+  if (objectItems.length > 0 && objectItems.length === concreteItems.length) {
+    const { merged, nullableKeys } = mergeObjectSamples(objectItems);
+    return {
+      id: createId(),
+      type: "section",
+      label: titleCase(key),
+      binding: key,
+      value: null,
+      children: Object.entries(merged).map(([childKey, childValue]) =>
+        valueToNode(childKey, childValue, nullableKeys.has(childKey)),
+      ),
+      props: {
+        dataType: "object",
+        nullable: nullableHint || hasNull,
+        isArray: true,
+        required: !nullableHint,
+      },
+    };
   }
 
-  return Object.entries(value);
+  const sample = concreteItems[0] ?? "";
+  const dataType = inferDataType(sample);
+  const stringOptions = enumOptions(value);
+  return {
+    id: createId(),
+    type: stringOptions.length > 1 ? "select" : nodeTypeForDataType(dataType),
+    label: titleCase(key),
+    binding: key,
+    value: sample,
+    children: [],
+    props: {
+      dataType,
+      nullable: nullableHint || hasNull,
+      isArray: true,
+      required: !nullableHint,
+      ...(stringOptions.length > 1 ? { options: stringOptions } : {}),
+    },
+  };
+}
+
+function mergeObjectSamples(samples: JsonRecord[]) {
+  const merged: JsonRecord = {};
+  const nullableKeys = new Set<string>();
+  const keys = new Set(samples.flatMap((sample) => Object.keys(sample)));
+
+  for (const key of keys) {
+    const values = samples.map((sample) => sample[key]).filter((item): item is JsonValue => item !== undefined);
+    const missing = values.length < samples.length;
+    if (missing || values.some((item) => item === null)) {
+      nullableKeys.add(key);
+    }
+    merged[key] = mergeSampleValues(values);
+  }
+
+  return { merged, nullableKeys };
+}
+
+function mergeSampleValues(values: JsonValue[]): JsonValue {
+  const concreteValues = values.filter((item) => item !== null);
+  const objectValues = concreteValues.filter(isRecord);
+  if (objectValues.length > 0 && objectValues.length === concreteValues.length) {
+    return mergeObjectSamples(objectValues).merged;
+  }
+  const arrayValues = concreteValues.filter(Array.isArray);
+  if (arrayValues.length > 0 && arrayValues.length === concreteValues.length) {
+    return arrayValues.flat();
+  }
+  return concreteValues[0] ?? null;
+}
+
+function schemaToNode(key: string, rawSchema: JsonRecord, required: boolean): BuilderNode {
+  const info = schemaInfo(rawSchema);
+  const schema = info.itemSchema ?? info.schema;
+  const properties = schemaProperties(schema);
+  const hasChildren = info.baseType === "object" || Object.keys(properties).length > 0;
+  const options = enumOptionsFromSchema(schema);
+  const type = hasChildren ? "section" : options.length > 0 ? "select" : nodeTypeForDataType(info.baseType);
+
+  return {
+    id: createId(),
+    type,
+    label: titleCase(key),
+    binding: key,
+    value: defaultValueForType(info.baseType),
+    children: hasChildren
+      ? Object.entries(properties).map(([childKey, childSchema]) =>
+          schemaToNode(childKey, asRecord(childSchema), requiredKeys(schema).has(childKey)),
+        )
+      : [],
+    props: {
+      dataType: info.baseType,
+      nullable: info.nullable,
+      isArray: info.isArray,
+      required,
+      ...(options.length > 0 ? { options } : {}),
+      ...(schemaString(schema, "description") ? { description: schemaString(schema, "description") } : {}),
+      ...(schemaString(schema, "$ref") ? { dataType: "custom", customType: refName(schemaString(schema, "$ref")) } : {}),
+    },
+  };
+}
+
+function schemaInfo(schema: JsonRecord): SchemaInfo {
+  const types = schemaTypes(schema);
+  const nullable = types.includes("null") || anyOfSchemas(schema).some((item) => schemaTypes(item).includes("null"));
+  const nonNullType = types.find((type) => type !== "null");
+  const isArray = nonNullType === "array" || isRecord(schema.items);
+  const itemSchema = isArray ? asRecord(schema.items) : null;
+  const baseType = schemaString(schema, "$ref")
+    ? "custom"
+    : jsonSchemaTypeToDataType(isArray && itemSchema ? schemaTypes(itemSchema).find((type) => type !== "null") : nonNullType);
+
+  return {
+    schema,
+    baseType,
+    nullable,
+    isArray,
+    itemSchema,
+  };
+}
+
+function schemaProperties(schema: JsonRecord): Record<string, JsonValue> {
+  return isRecord(schema.properties) ? schema.properties : {};
+}
+
+function requiredKeys(schema: JsonRecord) {
+  return new Set(Array.isArray(schema.required) ? schema.required.filter((item): item is string => typeof item === "string") : []);
+}
+
+function enumOptionsFromSchema(schema: JsonRecord) {
+  return Array.isArray(schema.enum) ? schema.enum.filter((item): item is string => typeof item === "string") : [];
+}
+
+function schemaTypes(schema: JsonRecord) {
+  if (Array.isArray(schema.type)) {
+    return schema.type.filter((item): item is string => typeof item === "string");
+  }
+  return typeof schema.type === "string" ? [schema.type] : [];
+}
+
+function anyOfSchemas(schema: JsonRecord) {
+  const choices = [...(Array.isArray(schema.anyOf) ? schema.anyOf : []), ...(Array.isArray(schema.oneOf) ? schema.oneOf : [])];
+  return choices.filter(isRecord);
+}
+
+function schemaString(schema: JsonRecord, key: string) {
+  return typeof schema[key] === "string" ? schema[key] : "";
+}
+
+function refName(ref: string) {
+  const segments = ref.split("/").filter(Boolean);
+  return segments[segments.length - 1] || "CustomType";
+}
+
+function objectEntries(value: JsonValue): Array<[string, JsonValue]> {
+  return isRecord(value) ? Object.entries(value) : [];
 }
 
 function inferDataType(value: JsonValue): FieldDataType {
   if (Array.isArray(value)) {
     return "array";
   }
-  if (value && typeof value === "object") {
+  if (isRecord(value)) {
     return "object";
   }
   if (typeof value === "number") {
@@ -167,12 +338,31 @@ function inferDataType(value: JsonValue): FieldDataType {
   return "string";
 }
 
+function jsonSchemaTypeToDataType(type: string | undefined): FieldDataType {
+  if (type === "integer" || type === "number") {
+    return "number";
+  }
+  if (type === "boolean") {
+    return "boolean";
+  }
+  if (type === "object") {
+    return "object";
+  }
+  if (type === "array") {
+    return "array";
+  }
+  return "string";
+}
+
 function nodeTypeForDataType(dataType: FieldDataType): NodeType {
   if (dataType === "number") {
     return "number";
   }
   if (dataType === "boolean") {
     return "checkbox";
+  }
+  if (dataType === "object") {
+    return "section";
   }
   return "text";
 }
@@ -197,8 +387,25 @@ function defaultValueForType(type: FieldDataType): JsonValue {
   if (type === "boolean") {
     return false;
   }
-  if (type === "object") {
+  if (type === "array") {
+    return [];
+  }
+  if (type === "object" || type === "custom") {
     return null;
   }
   return "New value";
+}
+
+function enumOptions(values: JsonValue[]) {
+  const strings = values.filter((item): item is string => typeof item === "string");
+  const options = [...new Set(strings)];
+  return options.length > 1 && options.length <= 12 ? options : [];
+}
+
+function isRecord(value: unknown): value is JsonRecord {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function asRecord(value: unknown): JsonRecord {
+  return isRecord(value) ? value : {};
 }

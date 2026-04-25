@@ -27,7 +27,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DragEvent } from "react";
-import { createDocumentFromJson, templateDocuments } from "./documentFactory";
+import { createDocumentFromJson, createDocumentFromJsonSchema, templateDocuments } from "./documentFactory";
 import { buildInternalNodes, createProjectFile, readProjectFile } from "./internalModel";
 import { generateOutput, validateDocument } from "./transformClient";
 import { selectNodeById, useBuilderStore } from "./store";
@@ -38,6 +38,7 @@ import type {
   ExportFormat,
   FieldDataType,
   GeneratedOutput,
+  ImportMode,
   JsonValue,
   NodeType,
   OutputMode,
@@ -99,6 +100,7 @@ function App() {
   const [canvasView, setCanvasView] = useState<CanvasView>("form");
   const [outputMode, setOutputMode] = useState<OutputMode>("values");
   const [importOpen, setImportOpen] = useState(false);
+  const [importMode, setImportMode] = useState<ImportMode>("values");
   const [importText, setImportText] = useState(sampleImportJson);
   const [importError, setImportError] = useState<string | null>(null);
   const [savedTemplates, setSavedTemplates] = useState<Array<{ name: string; document: DocumentModel }>>(() =>
@@ -180,15 +182,21 @@ function App() {
     setStatus(`${formatLabels[generated.format]} ${modeLabels[generated.mode].toLowerCase()} downloaded`);
   };
 
+  const changeImportMode = (mode: ImportMode) => {
+    setImportMode(mode);
+    setImportText(mode === "schema" ? sampleImportSchema : sampleImportJson);
+    setImportError(null);
+  };
+
   const importJson = () => {
     try {
       const parsed = JSON.parse(importText) as JsonValue;
-      replaceDocument(createDocumentFromJson(parsed));
+      replaceDocument(importMode === "schema" ? createDocumentFromJsonSchema(parsed) : createDocumentFromJson(parsed));
       setCanvasView("structure");
-      setOutputMode("values");
+      setOutputMode(importMode === "schema" ? "schema" : "values");
       setImportError(null);
       setImportOpen(false);
-      setStatus("JSON imported");
+      setStatus(importMode === "schema" ? "JSON Schema imported" : "JSON values imported");
     } catch (error) {
       setImportError(error instanceof Error ? error.message : "Invalid JSON");
     }
@@ -242,7 +250,7 @@ function App() {
   };
 
   return (
-    <main className="flex h-screen min-h-[720px] flex-col bg-[#f5f7fa] text-slate-950">
+    <main className="flex min-h-screen flex-col bg-[#f5f7fa] text-slate-950 lg:h-screen lg:min-h-[720px]">
       <header className="flex h-14 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4">
         <div className="flex items-center gap-3">
           <div className="flex size-8 items-center justify-center rounded-md bg-slate-950 text-white">
@@ -283,8 +291,8 @@ function App() {
         </div>
       </header>
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[260px_minmax(420px,1fr)_460px]">
-        <aside className="min-h-0 border-b border-slate-200 bg-white lg:border-b-0 lg:border-r">
+      <div className="grid flex-1 grid-cols-1 lg:min-h-0 lg:grid-cols-[260px_minmax(420px,1fr)_460px]">
+        <aside className="border-b border-slate-200 bg-white lg:min-h-0 lg:border-b-0 lg:border-r">
           <PanelHeader title="Components" caption="Drag onto the canvas" />
           <div className="grid grid-cols-2 gap-2 p-3 lg:grid-cols-1">
             {nodeCatalog.map((item) => (
@@ -333,7 +341,7 @@ function App() {
         </aside>
 
         <section
-          className="min-h-0 overflow-auto p-4"
+          className="p-4 lg:min-h-0 lg:overflow-auto"
           onDragOver={(event) => event.preventDefault()}
           onDrop={handleDrop}
         >
@@ -391,8 +399,8 @@ function App() {
           </div>
         </section>
 
-        <aside className="grid min-h-0 border-t border-slate-200 bg-white lg:border-l lg:border-t-0">
-          <div className="grid min-h-0 grid-rows-[minmax(285px,0.95fr)_minmax(340px,1.05fr)]">
+        <aside className="grid border-t border-slate-200 bg-white lg:min-h-0 lg:border-l lg:border-t-0">
+          <div className="grid lg:min-h-0 lg:grid-rows-[minmax(285px,0.95fr)_minmax(340px,1.05fr)]">
             <InspectorPanel
               selectedNode={selectedNode}
               pathSuggestions={pathSuggestions}
@@ -416,6 +424,7 @@ function App() {
       {importOpen ? (
         <ImportJsonDialog
           error={importError}
+          mode={importMode}
           value={importText}
           onChange={setImportText}
           onClose={() => {
@@ -423,6 +432,7 @@ function App() {
             setImportError(null);
           }}
           onImport={importJson}
+          onModeChange={changeImportMode}
         />
       ) : null}
     </main>
@@ -1195,22 +1205,41 @@ function flattenValue(value: JsonValue, path = ""): Array<{ path: string; type: 
 function ImportJsonDialog({
   value,
   error,
+  mode,
   onChange,
   onClose,
   onImport,
+  onModeChange,
 }: {
   value: string;
   error: string | null;
+  mode: ImportMode;
   onChange: (value: string) => void;
   onClose: () => void;
   onImport: () => void;
+  onModeChange: (mode: ImportMode) => void;
 }) {
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/30 p-4">
       <div className="grid max-h-[82vh] w-full max-w-2xl grid-rows-[auto_minmax(0,1fr)_auto] rounded-lg border border-slate-200 bg-white shadow-xl">
-        <div className="border-b border-slate-200 px-4 py-3">
-          <h2 className="text-sm font-semibold">Import JSON</h2>
-          <p className="text-xs text-slate-500">Rebuild the canvas from a canonical JSON structure.</p>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+          <div>
+            <h2 className="text-sm font-semibold">Import JSON or Schema</h2>
+            <p className="text-xs text-slate-500">
+              {mode === "schema"
+                ? "Rebuild the canvas from JSON Schema properties, required fields, enums, and arrays."
+                : "Rebuild the canvas from canonical JSON values and inferred field types."}
+            </p>
+          </div>
+          <SegmentedControl
+            ariaLabel="Import mode"
+            value={mode}
+            options={[
+              { value: "values", label: "Values" },
+              { value: "schema", label: "Schema" },
+            ]}
+            onChange={onModeChange}
+          />
         </div>
         <div className="min-h-0 p-4">
           <textarea
@@ -1233,7 +1262,7 @@ function ImportJsonDialog({
             type="button"
             onClick={onImport}
           >
-            Import JSON
+            Import {mode === "schema" ? "Schema" : "Values"}
           </button>
         </div>
       </div>
@@ -1283,6 +1312,47 @@ const sampleImportJson = JSON.stringify(
         role: "Compiler Engineer",
       },
       tags: ["navy", "cobol"],
+    },
+  },
+  null,
+  2,
+);
+
+const sampleImportSchema = JSON.stringify(
+  {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    type: "object",
+    required: ["user"],
+    properties: {
+      user: {
+        type: "object",
+        required: ["name", "profile"],
+        properties: {
+          name: {
+            type: "string",
+            description: "Display name",
+          },
+          age: {
+            type: ["number", "null"],
+          },
+          profile: {
+            type: "object",
+            required: ["role"],
+            properties: {
+              role: {
+                type: "string",
+                enum: ["Admin", "Editor", "Viewer"],
+              },
+              tags: {
+                type: "array",
+                items: {
+                  type: "string",
+                },
+              },
+            },
+          },
+        },
+      },
     },
   },
   null,
