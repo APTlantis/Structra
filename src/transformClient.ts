@@ -42,6 +42,7 @@ export async function validateDocument(document: DocumentModel): Promise<Validat
   const errors: string[] = [];
   visitNodes(document.nodes, null, (node, parentBinding) => {
     const binding = node.binding.trim();
+    const path = combineBinding(parentBinding, binding) ?? node.label;
     const isContainer = node.type === "section" || node.type === "grid";
     if (!binding && !isContainer) {
       warnings.push(`${node.label} has no binding and will be skipped.`);
@@ -49,6 +50,7 @@ export async function validateDocument(document: DocumentModel): Promise<Validat
     if (binding && !binding.split(".").every((part) => /^[A-Za-z0-9_-]+$/.test(part))) {
       errors.push(`${node.label} has an invalid binding: ${binding}`);
     }
+    validateNodeValue(node, path, errors);
     return combineBinding(parentBinding, binding);
   });
 
@@ -57,6 +59,77 @@ export async function validateDocument(document: DocumentModel): Promise<Validat
     errors,
     warnings,
   };
+}
+
+function validateNodeValue(node: BuilderNode, path: string, errors: string[]) {
+  if (node.type === "section" || node.type === "grid") {
+    validateNumberConstraint(node, path, node.children.length, "minProperties", "has fewer properties than");
+    validateNumberConstraint(node, path, node.children.length, "maxProperties", "has more properties than");
+    return;
+  }
+
+  const values = Boolean(node.props.isArray) ? arrayValue(node.value) : [node.value];
+  if (Boolean(node.props.isArray)) {
+    validateNumberConstraint(node, path, values.length, "minItems", "has fewer items than");
+    validateNumberConstraint(node, path, values.length, "maxItems", "has more items than");
+  }
+
+  for (const value of values) {
+    validateScalarConstraints(node, path, value, errors);
+  }
+
+  function validateNumberConstraint(
+    constraintNode: BuilderNode,
+    constraintPath: string,
+    value: number,
+    key: string,
+    message: string,
+  ) {
+    const limit = constraintNode.props[key];
+    if (typeof limit === "number" && Number.isFinite(limit)) {
+      if ((key.startsWith("min") && value < limit) || (key.startsWith("max") && value > limit)) {
+        errors.push(`${constraintPath} ${message} ${limit}.`);
+      }
+    }
+  }
+}
+
+function validateScalarConstraints(node: BuilderNode, path: string, value: JsonValue, errors: string[]) {
+  const dataType = typeof node.props.dataType === "string" ? node.props.dataType : node.type;
+  if (dataType === "string" && typeof value === "string") {
+    const minLength = node.props.minLength;
+    const maxLength = node.props.maxLength;
+    if (typeof minLength === "number" && value.length < minLength) {
+      errors.push(`${path} is shorter than ${minLength} characters.`);
+    }
+    if (typeof maxLength === "number" && value.length > maxLength) {
+      errors.push(`${path} is longer than ${maxLength} characters.`);
+    }
+    if (typeof node.props.pattern === "string" && node.props.pattern) {
+      try {
+        if (!new RegExp(node.props.pattern).test(value)) {
+          errors.push(`${path} does not match pattern ${node.props.pattern}.`);
+        }
+      } catch {
+        errors.push(`${path} has an invalid pattern constraint.`);
+      }
+    }
+  }
+
+  if (dataType === "number" && typeof value === "number") {
+    const minimum = node.props.minimum;
+    const maximum = node.props.maximum;
+    if (typeof minimum === "number" && value < minimum) {
+      errors.push(`${path} is below minimum ${minimum}.`);
+    }
+    if (typeof maximum === "number" && value > maximum) {
+      errors.push(`${path} is above maximum ${maximum}.`);
+    }
+  }
+}
+
+function arrayValue(value: JsonValue) {
+  return Array.isArray(value) ? value : [value];
 }
 
 function normalizeDocument(document: DocumentModel): JsonValue {

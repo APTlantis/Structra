@@ -184,9 +184,142 @@ fn validate_node(
         ));
     }
 
+    validate_node_value(node, path.as_deref().unwrap_or(&node.label), errors);
+
     for child in &node.children {
         validate_node(child, path.as_deref(), errors, warnings);
     }
+}
+
+fn validate_node_value(node: &BuilderNode, path: &str, errors: &mut Vec<String>) {
+    if matches!(node.node_type, NodeType::Section | NodeType::Grid) {
+        validate_count_constraint(
+            node,
+            path,
+            node.children.len(),
+            "minProperties",
+            "has fewer properties than",
+            errors,
+        );
+        validate_count_constraint(
+            node,
+            path,
+            node.children.len(),
+            "maxProperties",
+            "has more properties than",
+            errors,
+        );
+        return;
+    }
+
+    let values = if prop_bool(node, "isArray") {
+        node.value
+            .as_array()
+            .cloned()
+            .unwrap_or_else(|| vec![node.value.clone()])
+    } else {
+        vec![node.value.clone()]
+    };
+
+    if prop_bool(node, "isArray") {
+        validate_count_constraint(
+            node,
+            path,
+            values.len(),
+            "minItems",
+            "has fewer items than",
+            errors,
+        );
+        validate_count_constraint(
+            node,
+            path,
+            values.len(),
+            "maxItems",
+            "has more items than",
+            errors,
+        );
+    }
+
+    for value in values {
+        validate_scalar_constraints(node, path, &value, errors);
+    }
+}
+
+fn validate_count_constraint(
+    node: &BuilderNode,
+    path: &str,
+    value: usize,
+    key: &str,
+    message: &str,
+    errors: &mut Vec<String>,
+) {
+    if let Some(limit) = node.props.get(key).and_then(Value::as_u64) {
+        let violated = (key.starts_with("min") && value < limit as usize)
+            || (key.starts_with("max") && value > limit as usize);
+        if violated {
+            errors.push(format!("{path} {message} {limit}."));
+        }
+    }
+}
+
+fn validate_scalar_constraints(
+    node: &BuilderNode,
+    path: &str,
+    value: &Value,
+    errors: &mut Vec<String>,
+) {
+    let data_type = prop_string(node, "dataType").unwrap_or_else(|| {
+        match node.node_type {
+            NodeType::Text | NodeType::Select => "string",
+            NodeType::Number => "number",
+            NodeType::Checkbox => "boolean",
+            NodeType::Section | NodeType::Grid => "object",
+        }
+        .to_string()
+    });
+
+    if data_type == "string" {
+        if let Some(text) = value.as_str() {
+            if let Some(min_length) = node.props.get("minLength").and_then(Value::as_u64) {
+                if text.chars().count() < min_length as usize {
+                    errors.push(format!("{path} is shorter than {min_length} characters."));
+                }
+            }
+            if let Some(max_length) = node.props.get("maxLength").and_then(Value::as_u64) {
+                if text.chars().count() > max_length as usize {
+                    errors.push(format!("{path} is longer than {max_length} characters."));
+                }
+            }
+            if let Some(pattern) = prop_string(node, "pattern").filter(|value| !value.is_empty()) {
+                if !simple_pattern_matches(&pattern, text) {
+                    errors.push(format!("{path} does not match pattern {pattern}."));
+                }
+            }
+        }
+    }
+
+    if data_type == "number" {
+        if let Some(number) = value.as_f64() {
+            if let Some(minimum) = node.props.get("minimum").and_then(Value::as_f64) {
+                if number < minimum {
+                    errors.push(format!("{path} is below minimum {minimum}."));
+                }
+            }
+            if let Some(maximum) = node.props.get("maximum").and_then(Value::as_f64) {
+                if number > maximum {
+                    errors.push(format!("{path} is above maximum {maximum}."));
+                }
+            }
+        }
+    }
+}
+
+fn simple_pattern_matches(pattern: &str, text: &str) -> bool {
+    if let Some(prefix) = pattern.strip_prefix('^') {
+        let prefix = prefix.trim_end_matches('$');
+        return text.starts_with(prefix);
+    }
+    text.contains(pattern.trim_matches('$'))
 }
 
 fn normalize_document(document: &DocumentModel) -> Value {
@@ -822,5 +955,38 @@ mod tests {
         assert_eq!(output.data["properties"]["score"]["maximum"], json!(10));
         assert_eq!(output.data["properties"]["tags"]["minItems"], json!(1));
         assert_eq!(output.data["properties"]["tags"]["maxItems"], json!(4));
+    }
+
+    #[test]
+    fn validates_values_against_constraints() {
+        let mut name = node("name", NodeType::Text, "name", json!("A"));
+        name.props.insert("dataType".to_string(), json!("string"));
+        name.props.insert("minLength".to_string(), json!(2));
+        name.props.insert("pattern".to_string(), json!("^acct_"));
+
+        let mut score = node("score", NodeType::Number, "score", json!(11));
+        score.props.insert("dataType".to_string(), json!("number"));
+        score.props.insert("maximum".to_string(), json!(10));
+
+        let mut tags = node("tags", NodeType::Text, "tags", json!(["one", "two"]));
+        tags.props.insert("dataType".to_string(), json!("string"));
+        tags.props.insert("isArray".to_string(), json!(true));
+        tags.props.insert("maxItems".to_string(), json!(1));
+
+        let report = validate_document(&document(vec![name, score, tags]));
+
+        assert!(!report.valid);
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("shorter than 2")));
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("above maximum 10")));
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("more items than 1")));
     }
 }

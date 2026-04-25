@@ -592,6 +592,9 @@ function CanvasNode({
           />
           <div className="flex min-w-0 items-center gap-1 font-mono text-[11px] text-slate-500">
             {isContainer ? <span className="rounded bg-slate-100 px-1 text-slate-700">type: object</span> : null}
+            {Boolean(node.props.isArray) ? (
+              <span className="rounded bg-slate-100 px-1 text-slate-700">array of {fieldDataType(node)}</span>
+            ) : null}
             <span className="truncate">{node.binding || "unbound"}</span>
           </div>
         </div>
@@ -633,6 +636,26 @@ function CanvasNode({
 }
 
 function FieldPreview({ node, onUpdate }: { node: BuilderNode; onUpdate: (id: string, patch: Partial<BuilderNode>) => void }) {
+  if (Boolean(node.props.isArray)) {
+    const dataType = fieldDataType(node);
+    return (
+      <input
+        className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-400"
+        value={arrayItemsText(node.value)}
+        onClick={(event) => event.stopPropagation()}
+        onChange={(event) =>
+          onUpdate(node.id, {
+            value: event.currentTarget.value
+              .split(",")
+              .map((item) => item.trim())
+              .filter(Boolean)
+              .map((item) => (dataType === "number" ? Number(item) : item)),
+          })
+        }
+      />
+    );
+  }
+
   if (node.type === "checkbox") {
     return (
       <label className="inline-flex items-center gap-2 text-sm">
@@ -855,6 +878,9 @@ function TypeControl({ node, onUpdate }: { node: BuilderNode; onUpdate: (id: str
         <span className="text-xs font-semibold text-slate-700">Type</span>
         <span className="rounded bg-white px-1.5 py-0.5 font-mono text-[10px] text-slate-500">{node.binding || "unbound"}</span>
       </div>
+      <div className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-600">
+        {isArray ? `Array items: ${dataType}` : `Value type: ${dataType}`}
+      </div>
       <select
         className="h-9 rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-400"
         value={dataType}
@@ -1030,7 +1056,14 @@ function numberProp(node: BuilderNode, key: string) {
   return typeof node.props[key] === "number" && Number.isFinite(node.props[key]) ? String(node.props[key]) : "";
 }
 
+function arrayItemsText(value: JsonValue) {
+  return (Array.isArray(value) ? value : [value]).map((item) => String(item ?? "")).join(", ");
+}
+
 function ValueControl({ node, onUpdate }: { node: BuilderNode; onUpdate: (id: string, patch: Partial<BuilderNode>) => void }) {
+  const isArray = Boolean(node.props.isArray);
+  const dataType = fieldDataType(node);
+
   if (node.type === "checkbox") {
     return (
       <label className="flex items-center justify-between rounded-md border border-slate-200 bg-white p-3 text-sm">
@@ -1042,6 +1075,38 @@ function ValueControl({ node, onUpdate }: { node: BuilderNode; onUpdate: (id: st
           onChange={(event) => onUpdate(node.id, { value: event.currentTarget.checked })}
         />
       </label>
+    );
+  }
+
+  if (isArray) {
+    const updateItems = (value: string) => {
+      const items = value
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .map((item) => (dataType === "number" ? Number(item) : item));
+      onUpdate(node.id, { value: items });
+    };
+
+    return (
+      <>
+        {node.type === "select" ? (
+          <TextControl
+            label="Options"
+            value={optionValues(node).join(", ")}
+            onChange={(value) => {
+              const options = value
+                .split(",")
+                .map((option) => option.trim())
+                .filter(Boolean);
+              onUpdate(node.id, {
+                props: { ...node.props, options },
+              });
+            }}
+          />
+        ) : null}
+        <TextControl label="Items" value={arrayItemsText(node.value)} onChange={updateItems} />
+      </>
     );
   }
 
