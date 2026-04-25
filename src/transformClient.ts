@@ -109,6 +109,7 @@ function objectSchemaForNode(node: BuilderNode): JsonValue {
     type: "object",
     properties: {},
     ...(typeof node.props.description === "string" && node.props.description ? { description: node.props.description } : {}),
+    ...schemaConstraintProps(node, ["minProperties", "maxProperties"]),
   };
 }
 
@@ -140,8 +141,13 @@ function schemaForNode(node: BuilderNode): JsonValue {
     schema = { ...(schema as Record<string, JsonValue>), description: node.props.description };
   }
 
+  schema = {
+    ...(schema as Record<string, JsonValue>),
+    ...schemaConstraintProps(node, ["minLength", "maxLength", "pattern", "minimum", "maximum"]),
+  };
+
   if (Boolean(node.props.isArray)) {
-    schema = { type: "array", items: schema };
+    schema = { type: "array", items: schema, ...schemaConstraintProps(node, ["minItems", "maxItems"]) };
   }
 
   if (Boolean(node.props.nullable)) {
@@ -153,6 +159,20 @@ function schemaForNode(node: BuilderNode): JsonValue {
   }
 
   return schema;
+}
+
+function schemaConstraintProps(node: BuilderNode, keys: string[]) {
+  const props: Record<string, JsonValue> = {};
+  for (const key of keys) {
+    const value = node.props[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      props[key] = value;
+    }
+    if (key === "pattern" && typeof value === "string" && value.trim()) {
+      props[key] = value;
+    }
+  }
+  return props;
 }
 
 function insertSchemaPath(root: JsonValue, path: string[], leafSchema: JsonValue) {

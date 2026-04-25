@@ -250,6 +250,7 @@ fn object_schema_for_node(node: &BuilderNode) -> Value {
     if let Some(description) = prop_string(node, "description").filter(|value| !value.is_empty()) {
         schema.insert("description".to_string(), Value::String(description));
     }
+    copy_number_props(node, &mut schema, &["minProperties", "maxProperties"]);
     Value::Object(schema)
 }
 
@@ -286,10 +287,20 @@ fn schema_for_node(node: &BuilderNode) -> Value {
         schema.insert("description".to_string(), Value::String(description));
     }
 
+    copy_number_props(
+        node,
+        &mut schema,
+        &["minLength", "maxLength", "minimum", "maximum"],
+    );
+    if let Some(pattern) = prop_string(node, "pattern").filter(|value| !value.is_empty()) {
+        schema.insert("pattern".to_string(), Value::String(pattern));
+    }
+
     let schema = if prop_bool(node, "isArray") {
         let mut array_schema = Map::new();
         array_schema.insert("type".to_string(), Value::String("array".to_string()));
         array_schema.insert("items".to_string(), Value::Object(schema));
+        copy_number_props(node, &mut array_schema, &["minItems", "maxItems"]);
         Value::Object(array_schema)
     } else {
         Value::Object(schema)
@@ -340,6 +351,16 @@ fn prop_bool(node: &BuilderNode, key: &str) -> bool {
         .get(key)
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+fn copy_number_props(node: &BuilderNode, schema: &mut Map<String, Value>, keys: &[&str]) {
+    for key in keys {
+        if let Some(prop_value) = node.props.get(*key) {
+            if prop_value.as_f64().is_some_and(f64::is_finite) {
+                schema.insert((*key).to_string(), prop_value.clone());
+            }
+        }
+    }
 }
 
 fn insert_schema_path(root: &mut Value, segments: &[&str], leaf_schema: Value) {
@@ -762,5 +783,44 @@ mod tests {
             output.data["properties"]["account"]["properties"]["id"]["description"],
             json!("Stable account identifier")
         );
+    }
+
+    #[test]
+    fn schema_respects_validation_constraints() {
+        let mut name = node("name", NodeType::Text, "name", json!("Ada"));
+        name.props.insert("dataType".to_string(), json!("string"));
+        name.props.insert("minLength".to_string(), json!(2));
+        name.props.insert("maxLength".to_string(), json!(80));
+        name.props
+            .insert("pattern".to_string(), json!("^[A-Za-z ]+$"));
+
+        let mut score = node("score", NodeType::Number, "score", json!(5));
+        score.props.insert("dataType".to_string(), json!("number"));
+        score.props.insert("minimum".to_string(), json!(0));
+        score.props.insert("maximum".to_string(), json!(10));
+
+        let mut tags = node("tags", NodeType::Text, "tags", json!("alpha"));
+        tags.props.insert("dataType".to_string(), json!("string"));
+        tags.props.insert("isArray".to_string(), json!(true));
+        tags.props.insert("minItems".to_string(), json!(1));
+        tags.props.insert("maxItems".to_string(), json!(4));
+
+        let output = generate_output(
+            document(vec![name, score, tags]),
+            ExportFormat::Json,
+            OutputMode::Schema,
+        )
+        .unwrap();
+
+        assert_eq!(output.data["properties"]["name"]["minLength"], json!(2));
+        assert_eq!(output.data["properties"]["name"]["maxLength"], json!(80));
+        assert_eq!(
+            output.data["properties"]["name"]["pattern"],
+            json!("^[A-Za-z ]+$")
+        );
+        assert_eq!(output.data["properties"]["score"]["minimum"], json!(0));
+        assert_eq!(output.data["properties"]["score"]["maximum"], json!(10));
+        assert_eq!(output.data["properties"]["tags"]["minItems"], json!(1));
+        assert_eq!(output.data["properties"]["tags"]["maxItems"], json!(4));
     }
 }

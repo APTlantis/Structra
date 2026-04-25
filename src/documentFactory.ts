@@ -262,6 +262,7 @@ function schemaToNode(key: string, rawSchema: JsonRecord, required: boolean): Bu
       ...(options.length > 0 ? { options } : {}),
       ...(schemaString(schema, "description") ? { description: schemaString(schema, "description") } : {}),
       ...(schemaString(schema, "$ref") ? { dataType: "custom", customType: refName(schemaString(schema, "$ref")) } : {}),
+      ...constraintProps(info.schema, schema),
     },
   };
 }
@@ -311,6 +312,24 @@ function anyOfSchemas(schema: JsonRecord) {
 
 function schemaString(schema: JsonRecord, key: string) {
   return typeof schema[key] === "string" ? schema[key] : "";
+}
+
+function constraintProps(containerSchema: JsonRecord, itemSchema: JsonRecord) {
+  return {
+    ...numericProps(itemSchema, ["minLength", "maxLength", "minimum", "maximum", "minProperties", "maxProperties"]),
+    ...numericProps(containerSchema, ["minItems", "maxItems"]),
+    ...(schemaString(itemSchema, "pattern") ? { pattern: schemaString(itemSchema, "pattern") } : {}),
+  };
+}
+
+function numericProps(schema: JsonRecord, keys: string[]) {
+  const props: Record<string, JsonValue> = {};
+  for (const key of keys) {
+    if (typeof schema[key] === "number" && Number.isFinite(schema[key])) {
+      props[key] = schema[key];
+    }
+  }
+  return props;
 }
 
 function refName(ref: string) {

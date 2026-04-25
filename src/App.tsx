@@ -26,7 +26,7 @@ import {
   Undo2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { DragEvent } from "react";
+import type { DragEvent, ReactNode } from "react";
 import { createDocumentFromJson, createDocumentFromJsonSchema, templateDocuments } from "./documentFactory";
 import { buildInternalNodes, createProjectFile, readProjectFile } from "./internalModel";
 import { generateOutput, validateDocument } from "./transformClient";
@@ -879,6 +879,7 @@ function TypeControl({ node, onUpdate }: { node: BuilderNode; onUpdate: (id: str
         value={typeof node.props.description === "string" ? node.props.description : ""}
         onChange={(description) => updateProps({ description })}
       />
+      <ConstraintControl dataType={dataType} isArray={isArray} node={node} onUpdateProps={updateProps} />
       <div className="grid grid-cols-3 gap-2">
         <label className="flex items-center gap-2 rounded-md border border-slate-200 bg-white p-2 text-xs font-medium text-slate-700">
           <input
@@ -910,6 +911,123 @@ function TypeControl({ node, onUpdate }: { node: BuilderNode; onUpdate: (id: str
       </div>
     </div>
   );
+}
+
+function ConstraintControl({
+  dataType,
+  isArray,
+  node,
+  onUpdateProps,
+}: {
+  dataType: FieldDataType;
+  isArray: boolean;
+  node: BuilderNode;
+  onUpdateProps: (props: Record<string, JsonValue>) => void;
+}) {
+  const updateNumberProp = (key: string, value: string) => {
+    onUpdateProps({ [key]: value.trim() === "" ? null : Number(value) });
+  };
+
+  const controls: ReactNode[] = [];
+  if (dataType === "string" || node.type === "select") {
+    controls.push(
+      <NumberControl
+        key="minLength"
+        label="Min length"
+        value={numberProp(node, "minLength")}
+        onChange={(value) => updateNumberProp("minLength", value)}
+      />,
+      <NumberControl
+        key="maxLength"
+        label="Max length"
+        value={numberProp(node, "maxLength")}
+        onChange={(value) => updateNumberProp("maxLength", value)}
+      />,
+      <TextControl
+        key="pattern"
+        label="Pattern"
+        value={typeof node.props.pattern === "string" ? node.props.pattern : ""}
+        onChange={(pattern) => onUpdateProps({ pattern })}
+      />,
+    );
+  }
+  if (dataType === "number") {
+    controls.push(
+      <NumberControl
+        key="minimum"
+        label="Minimum"
+        value={numberProp(node, "minimum")}
+        onChange={(value) => updateNumberProp("minimum", value)}
+      />,
+      <NumberControl
+        key="maximum"
+        label="Maximum"
+        value={numberProp(node, "maximum")}
+        onChange={(value) => updateNumberProp("maximum", value)}
+      />,
+    );
+  }
+  if (dataType === "object") {
+    controls.push(
+      <NumberControl
+        key="minProperties"
+        label="Min props"
+        value={numberProp(node, "minProperties")}
+        onChange={(value) => updateNumberProp("minProperties", value)}
+      />,
+      <NumberControl
+        key="maxProperties"
+        label="Max props"
+        value={numberProp(node, "maxProperties")}
+        onChange={(value) => updateNumberProp("maxProperties", value)}
+      />,
+    );
+  }
+  if (isArray) {
+    controls.push(
+      <NumberControl
+        key="minItems"
+        label="Min items"
+        value={numberProp(node, "minItems")}
+        onChange={(value) => updateNumberProp("minItems", value)}
+      />,
+      <NumberControl
+        key="maxItems"
+        label="Max items"
+        value={numberProp(node, "maxItems")}
+        onChange={(value) => updateNumberProp("maxItems", value)}
+      />,
+    );
+  }
+
+  if (controls.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="grid gap-2 rounded-md border border-slate-200 bg-white p-3">
+      <div className="text-xs font-semibold text-slate-700">Constraints</div>
+      <div className="grid grid-cols-2 gap-2">{controls}</div>
+    </div>
+  );
+}
+
+function NumberControl({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  return (
+    <label className="grid gap-1.5">
+      <span className="text-xs font-medium text-slate-600">{label}</span>
+      <input
+        className="h-9 rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-400"
+        type="number"
+        value={value}
+        onChange={(event) => onChange(event.currentTarget.value)}
+      />
+    </label>
+  );
+}
+
+function numberProp(node: BuilderNode, key: string) {
+  return typeof node.props[key] === "number" && Number.isFinite(node.props[key]) ? String(node.props[key]) : "";
 }
 
 function ValueControl({ node, onUpdate }: { node: BuilderNode; onUpdate: (id: string, patch: Partial<BuilderNode>) => void }) {
