@@ -1,16 +1,3 @@
----
-[project]
-name = "Structra"
-slug = "structra"
-
-description = "A comprehensive schema and workflow builder for production-minded tooling."
-
-[tags]
-languages = ["typescript", "rust", "react"]
-platforms = ["windows", "macos", "linux"]
-tooling = ["tauri", "vite", "pnpm"]
----
-
 # <img src="docs/structra-logo.png" alt="Structra Logo" width="40"> Structra
 
 > A high-performance, cross-platform schema and workflow builder for structured data management.
