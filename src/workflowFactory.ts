@@ -256,6 +256,7 @@ export function normalizeWorkflow(value: unknown): WorkflowModel | null {
     schedule: typeof workflow.schedule === "string" ? workflow.schedule : initialWorkflow.schedule,
     runsOn: workflow.runsOn,
     steps,
+    ...(isWorkflowGraphLayout(workflow.graph) ? { graph: workflow.graph } : {}),
   };
 }
 
@@ -1026,6 +1027,15 @@ function isStringRecord(value: unknown): value is Record<string, string> {
     return false;
   }
   return Object.values(value).every((item) => typeof item === "string");
+}
+
+function isWorkflowGraphLayout(value: unknown): value is WorkflowModel["graph"] {
+  if (!isRecord(value) || !isRecord(value.positions)) {
+    return false;
+  }
+  return Object.values(value.positions).every(
+    (position) => isRecord(position) && typeof position.x === "number" && typeof position.y === "number",
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

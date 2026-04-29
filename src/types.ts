@@ -77,6 +77,10 @@ export interface WorkflowStep {
   env: Record<string, string>;
 }
 
+export interface WorkflowGraphLayout {
+  positions: Record<string, { x: number; y: number }>;
+}
+
 export interface WorkflowModel {
   version: string;
   name: string;
@@ -84,6 +88,7 @@ export interface WorkflowModel {
   schedule: string;
   runsOn: string;
   steps: WorkflowStep[];
+  graph?: WorkflowGraphLayout;
 }
 
 export interface WorkflowImportResult {

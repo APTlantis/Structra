@@ -10,6 +10,7 @@ import {
   applyNodeChanges,
   type Connection,
   type Edge as FlowEdge,
+  type EdgeChange,
   type Node as FlowNode,
   type NodeChange,
   type NodeProps,
@@ -126,6 +127,8 @@ interface WorkflowFlowNodeData extends Record<string, unknown> {
   issue?: WorkflowStepIssueSummary;
   orderIndex: number | null;
   blocked: boolean;
+  onDelete: (id: string) => void;
+  onDuplicate: (id: string) => void;
 }
 
 type WorkflowFlowNode = FlowNode<WorkflowFlowNodeData, "workflowStep">;
@@ -364,8 +367,10 @@ function App() {
     setWorkflow((current) => {
       const steps = current.steps.filter((step) => step.id !== id);
       const cleanedSteps = steps.map((step) => ({ ...step, needs: step.needs.filter((dependency) => dependency !== id) }));
+      const positions = { ...(current.graph?.positions ?? {}) };
+      delete positions[id];
       setSelectedWorkflowStepId(steps[0]?.id ?? null);
-      return { ...current, steps: cleanedSteps };
+      return { ...current, steps: cleanedSteps, graph: { ...(current.graph ?? { positions: {} }), positions } };
     });
     setStatus("Workflow step deleted");
   };
@@ -385,8 +390,13 @@ function App() {
         needs: [...source.needs],
       };
       const steps = [...current.steps.slice(0, index + 1), clone, ...current.steps.slice(index + 1)];
+      const sourcePosition = current.graph?.positions?.[source.id];
+      const positions = {
+        ...(current.graph?.positions ?? {}),
+        ...(sourcePosition ? { [clone.id]: { x: sourcePosition.x + 40, y: sourcePosition.y + 40 } } : {}),
+      };
       setSelectedWorkflowStepId(clone.id);
-      return { ...current, steps };
+      return { ...current, steps, graph: { ...(current.graph ?? { positions: {} }), positions } };
     });
     setStatus("Workflow step duplicated");
   };
@@ -615,6 +625,7 @@ function App() {
                 onMoveStep={moveWorkflowStep}
                 onSelectStep={setSelectedWorkflowStepId}
                 onUpdateStep={updateWorkflowStep}
+                onUpdateWorkflow={updateWorkflow}
               />
             )}
           </div>
@@ -809,7 +820,33 @@ function WorkflowFlowNodeCard({ data }: NodeProps<WorkflowFlowNode>) {
       <div className="border-b border-slate-100 px-3 py-2">
         <div className="flex items-center justify-between gap-2">
           <span className="truncate text-sm font-semibold text-slate-900">{data.step.name || data.step.id}</span>
-          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">{data.step.kind}</span>
+          <div className="flex shrink-0 items-center gap-1">
+            <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">{data.step.kind}</span>
+            <button
+              aria-label={`Duplicate ${data.step.name}`}
+              className="nodrag nopan inline-flex size-6 items-center justify-center rounded text-slate-500 hover:bg-slate-100 hover:text-slate-950"
+              title="Duplicate"
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                data.onDuplicate(data.step.id);
+              }}
+            >
+              <Copy size={12} aria-hidden="true" />
+            </button>
+            <button
+              aria-label={`Delete ${data.step.name}`}
+              className="nodrag nopan inline-flex size-6 items-center justify-center rounded text-slate-500 hover:bg-red-50 hover:text-red-700"
+              title="Delete"
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                data.onDelete(data.step.id);
+              }}
+            >
+              <Trash2 size={12} aria-hidden="true" />
+            </button>
+          </div>
         </div>
         <div className="mt-1 flex min-w-0 items-center gap-1 font-mono text-[11px] text-slate-500">
           <span className="truncate">{data.step.id}</span>
@@ -845,6 +882,7 @@ function WorkflowCanvas({
   onMoveStep,
   onSelectStep,
   onUpdateStep,
+  onUpdateWorkflow,
 }: {
   executionPlan: WorkflowExecutionPlan;
   issueMap: Map<string, WorkflowStepIssueSummary>;
@@ -857,24 +895,53 @@ function WorkflowCanvas({
   onMoveStep: (id: string, direction: -1 | 1) => void;
   onSelectStep: (id: string) => void;
   onUpdateStep: (id: string, patch: Partial<WorkflowStep>) => void;
+  onUpdateWorkflow: (patch: Partial<WorkflowModel>) => void;
 }) {
-  const [nodePositions, setNodePositions] = useState<Record<string, { x: number; y: number }>>({});
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const nodePositions = workflow.graph?.positions ?? {};
   const { edges, nodes } = useMemo(
-    () => buildWorkflowFlowElements(workflow, executionPlan, issueMap, selectedStepId, nodePositions),
-    [executionPlan, issueMap, nodePositions, selectedStepId, workflow],
+    () =>
+      buildWorkflowFlowElements(workflow, executionPlan, issueMap, selectedStepId, nodePositions, {
+        onDelete: onDeleteStep,
+        onDuplicate: onDuplicateStep,
+      }),
+    [executionPlan, issueMap, nodePositions, onDeleteStep, onDuplicateStep, selectedStepId, workflow],
   );
   const onNodesChange = useCallback(
     (changes: NodeChange<WorkflowFlowNode>[]) => {
       const changedNodes = applyNodeChanges(changes, nodes);
-      setNodePositions((current) => {
-        const next = { ...current };
-        for (const node of changedNodes) {
-          next[node.id] = node.position;
-        }
-        return next;
-      });
+      const nextPositions = { ...nodePositions };
+      for (const node of changedNodes) {
+        nextPositions[node.id] = node.position;
+      }
+      onUpdateWorkflow({ graph: { ...(workflow.graph ?? { positions: {} }), positions: nextPositions } });
     },
-    [nodes],
+    [nodePositions, nodes, onUpdateWorkflow, workflow.graph],
+  );
+  const removeDependencyEdge = useCallback(
+    (edgeId: string) => {
+      const edge = edges.find((item) => item.id === edgeId);
+      if (!edge) {
+        return;
+      }
+      const targetStep = workflow.steps.find((step) => step.id === edge.target);
+      if (!targetStep) {
+        return;
+      }
+      onUpdateStep(targetStep.id, { needs: targetStep.needs.filter((dependency) => dependency !== edge.source) });
+      setSelectedEdgeId(null);
+    },
+    [edges, onUpdateStep, workflow.steps],
+  );
+  const onEdgesChange = useCallback(
+    (changes: EdgeChange<FlowEdge>[]) => {
+      changes
+        .filter((change) => change.type === "remove")
+        .forEach((change) => {
+          removeDependencyEdge(change.id);
+        });
+    },
+    [removeDependencyEdge],
   );
   const onConnect = useCallback(
     (connection: Connection) => {
@@ -941,7 +1008,16 @@ function WorkflowCanvas({
             <h4 className="text-xs font-semibold text-slate-700">Graph Canvas</h4>
             <p className="text-[11px] text-slate-500">Connect nodes to create dependencies. Pan, zoom, and inspect flow shape.</p>
           </div>
-          <div className="flex flex-wrap gap-1.5 text-[11px] font-semibold">
+          <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-semibold">
+            {selectedEdgeId ? (
+              <button
+                className="rounded bg-red-50 px-2 py-1 text-red-700 ring-1 ring-red-200 hover:bg-red-100"
+                type="button"
+                onClick={() => removeDependencyEdge(selectedEdgeId)}
+              >
+                Remove selected edge
+              </button>
+            ) : null}
             <span className="rounded bg-white px-2 py-1 text-slate-600 ring-1 ring-slate-200">{nodes.length} nodes</span>
             <span className="rounded bg-white px-2 py-1 text-slate-600 ring-1 ring-slate-200">{edges.length} edges</span>
           </div>
@@ -965,8 +1041,11 @@ function WorkflowCanvas({
             snapGrid={[20, 20]}
             snapToGrid
             onConnect={onConnect}
+            onEdgeClick={(_, edge) => setSelectedEdgeId(edge.id)}
+            onEdgesChange={onEdgesChange}
             onNodeClick={(_, node) => onSelectStep(node.id)}
             onNodesChange={onNodesChange}
+            onPaneClick={() => setSelectedEdgeId(null)}
           >
             <Background gap={20} color="#e2e8f0" />
             <Controls position="bottom-left" />
@@ -1006,6 +1085,12 @@ function WorkflowCanvas({
         issueMap={issueMap}
         selectedStepId={selectedStepId}
         workflow={workflow}
+        onRemoveDependency={(stepId, dependency) => {
+          const step = workflow.steps.find((item) => item.id === stepId);
+          if (step) {
+            onUpdateStep(step.id, { needs: step.needs.filter((item) => item !== dependency) });
+          }
+        }}
         onSelectStep={onSelectStep}
       />
       <div className="grid gap-3 p-4">
@@ -1144,12 +1229,14 @@ function WorkflowDependencyMap({
   issueMap,
   selectedStepId,
   workflow,
+  onRemoveDependency,
   onSelectStep,
 }: {
   executionPlan: WorkflowExecutionPlan;
   issueMap: Map<string, WorkflowStepIssueSummary>;
   selectedStepId: string | null;
   workflow: WorkflowModel;
+  onRemoveDependency: (stepId: string, dependency: string) => void;
   onSelectStep: (id: string) => void;
 }) {
   const ids = new Set(workflow.steps.map((step) => step.id));
@@ -1194,24 +1281,37 @@ function WorkflowDependencyMap({
             </div>
           ) : (
             dependencies.map((edge, index) => (
-              <button
+              <div
                 key={`${edge.step.id}-${edge.dependency}-${index}`}
-                className={`grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 rounded-md border bg-white p-2 text-left text-xs transition hover:border-slate-400 ${
+                className={`grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-md border bg-white p-2 text-xs transition hover:border-slate-400 ${
                   edge.missing ? "border-red-200" : edge.step.id === selectedStepId ? "border-slate-400" : "border-slate-200"
                 }`}
-                type="button"
-                onClick={() => onSelectStep(edge.step.id)}
               >
-                <span
-                  className={`truncate rounded px-2 py-1 font-mono ${
-                    edge.missing ? "bg-red-50 text-red-700" : "bg-slate-100 text-slate-700"
-                  }`}
+                <button
+                  className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 text-left"
+                  type="button"
+                  onClick={() => onSelectStep(edge.step.id)}
                 >
-                  {edge.dependency}
-                </span>
-                <ArrowRight size={14} className="text-slate-400" aria-hidden="true" />
-                <span className="truncate rounded bg-slate-950 px-2 py-1 font-mono text-white">{edge.step.id}</span>
-              </button>
+                  <span
+                    className={`truncate rounded px-2 py-1 font-mono ${
+                      edge.missing ? "bg-red-50 text-red-700" : "bg-slate-100 text-slate-700"
+                    }`}
+                  >
+                    {edge.dependency}
+                  </span>
+                  <ArrowRight size={14} className="text-slate-400" aria-hidden="true" />
+                  <span className="truncate rounded bg-slate-950 px-2 py-1 font-mono text-white">{edge.step.id}</span>
+                </button>
+                <button
+                  aria-label={`Remove dependency ${edge.dependency} to ${edge.step.id}`}
+                  className="inline-flex size-7 items-center justify-center rounded-md text-slate-500 hover:bg-red-50 hover:text-red-700"
+                  title="Remove dependency"
+                  type="button"
+                  onClick={() => onRemoveDependency(edge.step.id, edge.dependency)}
+                >
+                  <Trash2 size={13} aria-hidden="true" />
+                </button>
+              </div>
             ))
           )}
         </div>
@@ -2483,6 +2583,10 @@ function buildWorkflowFlowElements(
   issueMap: Map<string, WorkflowStepIssueSummary>,
   selectedStepId: string | null,
   nodePositions: Record<string, { x: number; y: number }>,
+  actions: {
+    onDelete: (id: string) => void;
+    onDuplicate: (id: string) => void;
+  },
 ): { nodes: WorkflowFlowNode[]; edges: FlowEdge[] } {
   const depthMap = workflowDepthMap(workflow);
   const rowMap = new Map(workflow.steps.map((step, index) => [step.id, index]));
@@ -2516,6 +2620,8 @@ function buildWorkflowFlowElements(
         issue: issueMap.get(step.id),
         orderIndex: orderMap.get(step.id) ?? null,
         blocked: blocked.has(step.id),
+        onDelete: actions.onDelete,
+        onDuplicate: actions.onDuplicate,
       },
     };
   });
