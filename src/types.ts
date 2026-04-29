@@ -63,7 +63,9 @@ export type WorkflowTrigger = "manual" | "push" | "schedule";
 
 export type WorkflowStepKind = "run" | "uses" | "approval";
 
-export type WorkflowExportTarget = "portable" | "github-actions";
+export type WorkflowExportTarget = "portable" | "github-actions" | "gitlab-ci";
+
+export type WorkflowImportSource = "portable" | "github-actions";
 
 export interface WorkflowStep {
   id: string;
@@ -82,6 +84,18 @@ export interface WorkflowModel {
   schedule: string;
   runsOn: string;
   steps: WorkflowStep[];
+}
+
+export interface WorkflowImportResult {
+  workflow: WorkflowModel;
+  source: WorkflowImportSource;
+  warnings: string[];
+}
+
+export interface WorkflowTemplate {
+  name: string;
+  description: string;
+  workflow: WorkflowModel;
 }
 
 export const exportFormats: ExportFormat[] = ["json", "yaml", "toml", "xml"];

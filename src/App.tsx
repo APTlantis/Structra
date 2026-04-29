@@ -8,6 +8,7 @@ import {
   Copy,
   Download,
   FolderOpen,
+  GitBranch,
   GitCompareArrows,
   Grid2X2,
   Hash,
@@ -36,7 +37,10 @@ import {
   envFromText,
   envToText,
   initialWorkflow,
+  importWorkflowYaml,
+  validateWorkflow,
   workflowExportFilename,
+  workflowTemplates,
   workflowToYaml,
 } from "./workflowFactory";
 import type {
@@ -128,6 +132,7 @@ function App() {
   const [workflowTarget, setWorkflowTarget] = useState<WorkflowExportTarget>("portable");
   const [selectedWorkflowStepId, setSelectedWorkflowStepId] = useState(initialWorkflow.steps[0]?.id ?? null);
   const projectInputRef = useRef<HTMLInputElement | null>(null);
+  const workflowInputRef = useRef<HTMLInputElement | null>(null);
 
   const selectedNode = useMemo(() => selectNodeById(document, selectedNodeId), [document, selectedNodeId]);
   const selectedWorkflowStep = useMemo(
@@ -137,6 +142,8 @@ function App() {
   const pathSuggestions = useMemo(() => collectBindingPaths(document), [document]);
   const internalNodes = useMemo(() => buildInternalNodes(document), [document]);
   const workflowYaml = useMemo(() => workflowToYaml(workflow, workflowTarget), [workflow, workflowTarget]);
+  const workflowValidation = useMemo(() => validateWorkflow(workflow, workflowTarget), [workflow, workflowTarget]);
+  const workflowIssueMap = useMemo(() => workflowStepIssueMap(workflow), [workflow]);
 
   useEffect(() => {
     documentElement().classList.toggle("dark", theme === "dark");
@@ -274,6 +281,31 @@ function App() {
     }
   };
 
+  const importWorkflowFile = async (file: File) => {
+    try {
+      const result = importWorkflowYaml(await file.text());
+      setWorkflow(result.workflow);
+      setWorkflowTarget(result.source);
+      setSelectedWorkflowStepId(result.workflow.steps[0]?.id ?? null);
+      setCanvasView("workflow");
+      setStatus(
+        result.warnings.length > 0
+          ? `${result.source === "github-actions" ? "GitHub Actions" : "Workflow"} imported with warnings`
+          : `${result.source === "github-actions" ? "GitHub Actions" : "Workflow"} imported`,
+      );
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Invalid workflow YAML");
+    }
+  };
+
+  const applyWorkflowTemplate = (nextWorkflow: WorkflowModel) => {
+    const workflowCopy = structuredClone(nextWorkflow);
+    setWorkflow(workflowCopy);
+    setSelectedWorkflowStepId(workflowCopy.steps[0]?.id ?? null);
+    setCanvasView("workflow");
+    setStatus("Workflow preset loaded");
+  };
+
   const addWorkflowStep = (kind: WorkflowStepKind) => {
     const step = createWorkflowStep(kind);
     setWorkflow((current) => ({ ...current, steps: [...current.steps, step] }));
@@ -355,6 +387,19 @@ function App() {
               const file = event.currentTarget.files?.[0];
               if (file) {
                 void loadProjectFile(file);
+              }
+              event.currentTarget.value = "";
+            }}
+          />
+          <input
+            ref={workflowInputRef}
+            accept=".yaml,.yml,text/yaml,application/yaml"
+            className="hidden"
+            type="file"
+            onChange={(event) => {
+              const file = event.currentTarget.files?.[0];
+              if (file) {
+                void importWorkflowFile(file);
               }
               event.currentTarget.value = "";
             }}
@@ -445,14 +490,24 @@ function App() {
                   onChange={setCanvasView}
                 />
                 {canvasView === "workflow" ? (
-                  <button
-                    className="inline-flex h-9 items-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800"
-                    type="button"
-                    onClick={() => addWorkflowStep("run")}
-                  >
-                    <Plus size={16} aria-hidden="true" />
-                    Add step
-                  </button>
+                  <>
+                    <button
+                      className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                      type="button"
+                      onClick={() => workflowInputRef.current?.click()}
+                    >
+                      <Import size={16} aria-hidden="true" />
+                      Import YAML
+                    </button>
+                    <button
+                      className="inline-flex h-9 items-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800"
+                      type="button"
+                      onClick={() => addWorkflowStep("run")}
+                    >
+                      <Plus size={16} aria-hidden="true" />
+                      Add step
+                    </button>
+                  </>
                 ) : (
                   <button
                     className="inline-flex h-9 items-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800"
@@ -491,8 +546,10 @@ function App() {
               <StructureView data={generated?.data ?? {}} internalNodes={internalNodes} mode={outputMode} />
             ) : (
               <WorkflowCanvas
+                issueMap={workflowIssueMap}
                 workflow={workflow}
                 selectedStepId={selectedWorkflowStepId}
+                onApplyTemplate={applyWorkflowTemplate}
                 onAddStep={addWorkflowStep}
                 onDeleteStep={deleteWorkflowStep}
                 onMoveStep={moveWorkflowStep}
@@ -510,6 +567,7 @@ function App() {
                 <WorkflowInspector
                   selectedStep={selectedWorkflowStep}
                   workflow={workflow}
+                  issueMap={workflowIssueMap}
                   onDeleteStep={deleteWorkflowStep}
                   onUpdateStep={updateWorkflowStep}
                   onUpdateWorkflow={updateWorkflow}
@@ -517,6 +575,7 @@ function App() {
                 <WorkflowExportPanel
                   content={workflowYaml}
                   target={workflowTarget}
+                  validation={workflowValidation}
                   onCopy={copyWorkflowYaml}
                   onDownload={downloadWorkflowYaml}
                   onTargetChange={setWorkflowTarget}
@@ -670,16 +729,20 @@ function EmptyCanvas() {
 }
 
 function WorkflowCanvas({
+  issueMap,
   workflow,
   selectedStepId,
+  onApplyTemplate,
   onAddStep,
   onDeleteStep,
   onMoveStep,
   onSelectStep,
   onUpdateStep,
 }: {
+  issueMap: Map<string, WorkflowStepIssueSummary>;
   workflow: WorkflowModel;
   selectedStepId: string | null;
+  onApplyTemplate: (workflow: WorkflowModel) => void;
   onAddStep: (kind: WorkflowStepKind) => void;
   onDeleteStep: (id: string) => void;
   onMoveStep: (id: string, direction: -1 | 1) => void;
@@ -717,9 +780,33 @@ function WorkflowCanvas({
           </button>
         </div>
       </div>
+      <div className="grid gap-2 border-b border-slate-200 bg-white p-4">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <h4 className="text-xs font-semibold text-slate-700">Workflow Presets</h4>
+            <p className="text-[11px] text-slate-500">Load a practical starter before shaping dependencies.</p>
+          </div>
+          <span className="rounded bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-500">{workflowTemplates.length} presets</span>
+        </div>
+        <div className="grid gap-2 md:grid-cols-2">
+          {workflowTemplates.map((template) => (
+            <button
+              key={template.name}
+              className="rounded-md border border-slate-200 bg-slate-50 p-2 text-left transition hover:border-slate-400 hover:bg-white"
+              type="button"
+              onClick={() => onApplyTemplate(template.workflow)}
+            >
+              <span className="block text-xs font-semibold text-slate-800">{template.name}</span>
+              <span className="block truncate text-[11px] text-slate-500">{template.description}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+      <WorkflowDependencyMap issueMap={issueMap} selectedStepId={selectedStepId} workflow={workflow} onSelectStep={onSelectStep} />
       <div className="grid gap-3 p-4">
         {workflow.steps.map((step, index) => (
           <WorkflowStepCard
+            issue={issueMap.get(step.id)}
             key={step.id}
             index={index}
             selected={step.id === selectedStepId}
@@ -737,6 +824,7 @@ function WorkflowCanvas({
 
 function WorkflowStepCard({
   index,
+  issue,
   selected,
   step,
   onDelete,
@@ -745,6 +833,7 @@ function WorkflowStepCard({
   onUpdate,
 }: {
   index: number;
+  issue?: WorkflowStepIssueSummary;
   selected: boolean;
   step: WorkflowStep;
   onDelete: (id: string) => void;
@@ -752,10 +841,18 @@ function WorkflowStepCard({
   onSelect: (id: string) => void;
   onUpdate: (id: string, patch: Partial<WorkflowStep>) => void;
 }) {
+  const hasErrors = Boolean(issue?.errors.length);
+  const hasWarnings = Boolean(issue?.warnings.length);
   return (
     <div
       className={`rounded-md border bg-white shadow-sm transition ${
-        selected ? "border-slate-950 ring-2 ring-slate-200" : "border-slate-200 hover:border-slate-400 hover:shadow-md"
+        selected
+          ? "border-slate-950 ring-2 ring-slate-200"
+          : hasErrors
+            ? "border-red-300 hover:border-red-400 hover:shadow-md"
+            : hasWarnings
+              ? "border-amber-300 hover:border-amber-400 hover:shadow-md"
+              : "border-slate-200 hover:border-slate-400 hover:shadow-md"
       }`}
       role="button"
       tabIndex={0}
@@ -782,6 +879,8 @@ function WorkflowStepCard({
           </div>
           <div className="mt-1 flex min-w-0 items-center gap-1 font-mono text-[11px] text-slate-500">
             <span className="rounded bg-slate-100 px-1 text-slate-700">{step.kind}</span>
+            {hasErrors ? <span className="rounded bg-red-50 px-1 text-red-700">error</span> : null}
+            {!hasErrors && hasWarnings ? <span className="rounded bg-amber-50 px-1 text-amber-700">warning</span> : null}
             {step.needs.length > 0 ? <span className="truncate">needs {step.needs.join(", ")}</span> : <span>no dependencies</span>}
           </div>
         </div>
@@ -792,6 +891,15 @@ function WorkflowStepCard({
         </div>
       </div>
       <div className="grid gap-2 p-3">
+        {issue && (issue.errors.length > 0 || issue.warnings.length > 0) ? (
+          <div
+            className={`rounded-md border p-2 text-xs ${
+              issue.errors.length > 0 ? "border-red-200 bg-red-50 text-red-800" : "border-amber-200 bg-amber-50 text-amber-900"
+            }`}
+          >
+            {[...issue.errors, ...issue.warnings].slice(0, 2).join(" ")}
+          </div>
+        ) : null}
         <select
           className="h-9 rounded-md border border-slate-200 bg-white px-2 text-sm outline-none focus:border-slate-400"
           value={step.kind}
@@ -817,6 +925,106 @@ function WorkflowStepCard({
             onChange={(event) => onUpdate(step.id, { command: event.currentTarget.value })}
           />
         )}
+      </div>
+    </div>
+  );
+}
+
+function WorkflowDependencyMap({
+  issueMap,
+  selectedStepId,
+  workflow,
+  onSelectStep,
+}: {
+  issueMap: Map<string, WorkflowStepIssueSummary>;
+  selectedStepId: string | null;
+  workflow: WorkflowModel;
+  onSelectStep: (id: string) => void;
+}) {
+  const ids = new Set(workflow.steps.map((step) => step.id));
+  const dependencies = workflow.steps.flatMap((step) =>
+    step.needs.map((dependency) => ({
+      dependency,
+      step,
+      missing: !ids.has(dependency),
+    })),
+  );
+  const rootSteps = workflow.steps.filter((step) => step.needs.length === 0);
+  const errorCount = [...issueMap.values()].reduce((count, issue) => count + issue.errors.length, 0);
+  const warningCount = [...issueMap.values()].reduce((count, issue) => count + issue.warnings.length, 0);
+
+  return (
+    <div className="border-b border-slate-200 bg-slate-50 p-4">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className="flex size-8 items-center justify-center rounded-md bg-white text-slate-600 ring-1 ring-slate-200">
+            <GitBranch size={16} aria-hidden="true" />
+          </span>
+          <div>
+            <h4 className="text-xs font-semibold text-slate-700">Dependency Map</h4>
+            <p className="text-[11px] text-slate-500">Roots, edges, and validation pressure.</p>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-1.5 text-[11px] font-semibold">
+          <span className="rounded bg-white px-2 py-1 text-slate-600 ring-1 ring-slate-200">{workflow.steps.length} steps</span>
+          <span className="rounded bg-white px-2 py-1 text-slate-600 ring-1 ring-slate-200">{dependencies.length} edges</span>
+          {errorCount > 0 ? <span className="rounded bg-red-50 px-2 py-1 text-red-700 ring-1 ring-red-200">{errorCount} errors</span> : null}
+          {warningCount > 0 ? (
+            <span className="rounded bg-amber-50 px-2 py-1 text-amber-700 ring-1 ring-amber-200">{warningCount} warnings</span>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_220px]">
+        <div className="grid gap-2">
+          {dependencies.length === 0 ? (
+            <div className="rounded-md border border-dashed border-slate-200 bg-white p-3 text-xs text-slate-500">
+              No dependency edges yet. Add dependencies in the selected step inspector.
+            </div>
+          ) : (
+            dependencies.map((edge, index) => (
+              <button
+                key={`${edge.step.id}-${edge.dependency}-${index}`}
+                className={`grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 rounded-md border bg-white p-2 text-left text-xs transition hover:border-slate-400 ${
+                  edge.missing ? "border-red-200" : edge.step.id === selectedStepId ? "border-slate-400" : "border-slate-200"
+                }`}
+                type="button"
+                onClick={() => onSelectStep(edge.step.id)}
+              >
+                <span
+                  className={`truncate rounded px-2 py-1 font-mono ${
+                    edge.missing ? "bg-red-50 text-red-700" : "bg-slate-100 text-slate-700"
+                  }`}
+                >
+                  {edge.dependency}
+                </span>
+                <ArrowRight size={14} className="text-slate-400" aria-hidden="true" />
+                <span className="truncate rounded bg-slate-950 px-2 py-1 font-mono text-white">{edge.step.id}</span>
+              </button>
+            ))
+          )}
+        </div>
+        <div className="rounded-md border border-slate-200 bg-white p-3">
+          <div className="mb-2 text-xs font-semibold text-slate-700">Root Steps</div>
+          <div className="grid gap-1">
+            {rootSteps.length > 0 ? (
+              rootSteps.map((step) => (
+                <button
+                  key={step.id}
+                  className={`truncate rounded px-2 py-1 text-left font-mono text-[11px] ${
+                    step.id === selectedStepId ? "bg-slate-950 text-white" : "bg-slate-50 text-slate-600 hover:bg-slate-100"
+                  }`}
+                  type="button"
+                  onClick={() => onSelectStep(step.id)}
+                >
+                  {step.id}
+                </button>
+              ))
+            ) : (
+              <div className="rounded bg-amber-50 px-2 py-1 text-[11px] text-amber-800">No root step detected.</div>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -1495,12 +1703,14 @@ function StructureTree({ data, internalNodes }: { data: JsonValue; internalNodes
 }
 
 function WorkflowInspector({
+  issueMap,
   selectedStep,
   workflow,
   onDeleteStep,
   onUpdateStep,
   onUpdateWorkflow,
 }: {
+  issueMap: Map<string, WorkflowStepIssueSummary>;
   selectedStep: WorkflowStep | null;
   workflow: WorkflowModel;
   onDeleteStep: (id: string) => void;
@@ -1581,6 +1791,12 @@ function WorkflowInspector({
                 })
               }
             />
+            <WorkflowDependencyPicker
+              issue={issueMap.get(selectedStep.id)}
+              selectedStep={selectedStep}
+              steps={workflow.steps}
+              onChange={(needs) => onUpdateStep(selectedStep.id, { needs })}
+            />
             <TextAreaControl
               label="Environment"
               value={envToText(selectedStep.env)}
@@ -1595,22 +1811,81 @@ function WorkflowInspector({
   );
 }
 
+function WorkflowDependencyPicker({
+  issue,
+  selectedStep,
+  steps,
+  onChange,
+}: {
+  issue?: WorkflowStepIssueSummary;
+  selectedStep: WorkflowStep;
+  steps: WorkflowStep[];
+  onChange: (needs: string[]) => void;
+}) {
+  const candidates = steps.filter((step) => step.id !== selectedStep.id);
+  const needs = new Set(selectedStep.needs);
+
+  const toggleDependency = (id: string) => {
+    onChange(needs.has(id) ? selectedStep.needs.filter((dependency) => dependency !== id) : [...selectedStep.needs, id]);
+  };
+
+  return (
+    <div className="grid gap-2 rounded-md border border-slate-200 bg-white p-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-semibold text-slate-700">Dependency Builder</span>
+        <span className="rounded bg-slate-50 px-1.5 py-0.5 font-mono text-[10px] text-slate-500">{selectedStep.id}</span>
+      </div>
+      <div className="grid gap-1.5">
+        {candidates.length > 0 ? (
+          candidates.map((step) => {
+            const selected = needs.has(step.id);
+            return (
+              <button
+                key={step.id}
+                className={`flex min-w-0 items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-left text-xs ${
+                  selected
+                    ? "border-slate-950 bg-slate-950 text-white"
+                    : "border-slate-200 bg-white text-slate-700 hover:border-slate-400 hover:bg-slate-50"
+                }`}
+                type="button"
+                onClick={() => toggleDependency(step.id)}
+              >
+                <span className="truncate font-mono">{step.id}</span>
+                <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${selected ? "bg-white/15" : "bg-slate-100 text-slate-500"}`}>
+                  {selected ? "needed" : step.kind}
+                </span>
+              </button>
+            );
+          })
+        ) : (
+          <div className="rounded bg-slate-50 px-2 py-2 text-xs text-slate-500">Add another step to create dependencies.</div>
+        )}
+      </div>
+      {issue && issue.errors.length > 0 ? (
+        <div className="rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-800">{issue.errors.slice(0, 2).join(" ")}</div>
+      ) : null}
+    </div>
+  );
+}
+
 function WorkflowExportPanel({
   content,
   target,
+  validation,
   onCopy,
   onDownload,
   onTargetChange,
 }: {
   content: string;
   target: WorkflowExportTarget;
+  validation: ValidationReport;
   onCopy: () => void;
   onDownload: () => void;
   onTargetChange: (target: WorkflowExportTarget) => void;
 }) {
   return (
     <section className="grid min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto]">
-      <PanelHeader title="YAML" caption="Portable workflow definition" />
+      <PanelHeader title="YAML" caption={workflowTargetCaption(target)} />
       <div className="flex items-center justify-between gap-2 border-b border-slate-200 p-2">
         <SegmentedControl
           ariaLabel="Workflow export target"
@@ -1618,30 +1893,70 @@ function WorkflowExportPanel({
           options={[
             { value: "portable", label: "Generic" },
             { value: "github-actions", label: "GitHub Actions" },
+            { value: "gitlab-ci", label: "GitLab CI" },
           ]}
           onChange={onTargetChange}
         />
       </div>
-      <OutputCode title={target === "github-actions" ? "github-actions.yml" : "workflow.yaml"} content={content} />
-      <div className="grid grid-cols-2 gap-2 border-t border-slate-200 p-3">
-        <button
-          className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white text-sm font-medium hover:bg-slate-50"
-          type="button"
-          onClick={onCopy}
-        >
-          <Clipboard size={15} aria-hidden="true" />
-          Copy
-        </button>
-        <button
-          className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-slate-950 text-sm font-medium text-white hover:bg-slate-800"
-          type="button"
-          onClick={onDownload}
-        >
-          <Download size={15} aria-hidden="true" />
-          Download
-        </button>
+      <OutputCode title={workflowPreviewTitle(target)} content={content} />
+      <div className="grid gap-2 border-t border-slate-200 p-3">
+        <ValidationSummary report={validation} validLabel="Workflow is valid." />
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white text-sm font-medium hover:bg-slate-50"
+            type="button"
+            onClick={onCopy}
+          >
+            <Clipboard size={15} aria-hidden="true" />
+            Copy
+          </button>
+          <button
+            className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-slate-950 text-sm font-medium text-white hover:bg-slate-800"
+            type="button"
+            onClick={onDownload}
+          >
+            <Download size={15} aria-hidden="true" />
+            Download
+          </button>
+        </div>
       </div>
     </section>
+  );
+}
+
+function workflowTargetCaption(target: WorkflowExportTarget) {
+  if (target === "github-actions") {
+    return "GitHub Actions workflow";
+  }
+  if (target === "gitlab-ci") {
+    return "GitLab CI pipeline";
+  }
+  return "Portable workflow definition";
+}
+
+function workflowPreviewTitle(target: WorkflowExportTarget) {
+  if (target === "github-actions") {
+    return "github-actions.yml";
+  }
+  if (target === "gitlab-ci") {
+    return ".gitlab-ci.yml";
+  }
+  return "workflow.yaml";
+}
+
+function ValidationSummary({ report, validLabel }: { report: ValidationReport; validLabel: string }) {
+  if (report.errors.length === 0 && report.warnings.length === 0) {
+    return <div className="rounded-md border border-emerald-200 bg-emerald-50 p-2 text-xs text-emerald-900">{validLabel}</div>;
+  }
+
+  return (
+    <div
+      className={`rounded-md border p-2 text-xs ${
+        report.errors.length > 0 ? "border-red-200 bg-red-50 text-red-800" : "border-amber-200 bg-amber-50 text-amber-900"
+      }`}
+    >
+      {[...report.errors, ...report.warnings].slice(0, 3).join(" ")}
+    </div>
   );
 }
 
@@ -1825,6 +2140,104 @@ function flattenValue(value: JsonValue, path = ""): Array<{ path: string; type: 
   }
 
   return [{ path, type: value === null ? "null" : typeof value }];
+}
+
+interface WorkflowStepIssueSummary {
+  errors: string[];
+  warnings: string[];
+}
+
+function workflowStepIssueMap(workflow: WorkflowModel) {
+  const issues = new Map<string, WorkflowStepIssueSummary>();
+  const ids = new Set(workflow.steps.map((step) => step.id));
+  const names = new Map<string, string[]>();
+
+  const ensure = (id: string) => {
+    const existing = issues.get(id);
+    if (existing) {
+      return existing;
+    }
+    const next = { errors: [], warnings: [] };
+    issues.set(id, next);
+    return next;
+  };
+
+  for (const step of workflow.steps) {
+    const issue = ensure(step.id);
+    const label = step.name.trim() || step.id;
+    const nameGroup = names.get(step.name.trim()) ?? [];
+    if (step.name.trim()) {
+      nameGroup.push(step.id);
+      names.set(step.name.trim(), nameGroup);
+    }
+    if (!step.name.trim()) {
+      issue.warnings.push(`${step.id} has no display name.`);
+    }
+    if (step.kind === "uses" && !step.uses.trim()) {
+      issue.errors.push(`${label} needs an action reference.`);
+    }
+    if (step.kind !== "uses" && !step.command.trim()) {
+      issue.errors.push(`${label} needs a command or gate note.`);
+    }
+    for (const dependency of step.needs) {
+      if (dependency === step.id) {
+        issue.errors.push(`${label} depends on itself.`);
+      } else if (!ids.has(dependency)) {
+        issue.errors.push(`${label} depends on missing step ${dependency}.`);
+      }
+    }
+  }
+
+  for (const group of names.values()) {
+    if (group.length > 1) {
+      group.forEach((id) => ensure(id).warnings.push("Duplicate step name."));
+    }
+  }
+
+  const cycle = findWorkflowCycle(workflow);
+  if (cycle.length > 0) {
+    cycle.forEach((id) => ensure(id).errors.push("Circular dependency."));
+  }
+
+  return issues;
+}
+
+function findWorkflowCycle(workflow: WorkflowModel) {
+  const ids = new Set(workflow.steps.map((step) => step.id));
+  const graph = new Map(workflow.steps.map((step) => [step.id, step.needs.filter((dependency) => ids.has(dependency))]));
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const stack: string[] = [];
+
+  const visit = (id: string): string[] | null => {
+    if (visiting.has(id)) {
+      const start = stack.indexOf(id);
+      return stack.slice(start);
+    }
+    if (visited.has(id)) {
+      return null;
+    }
+    visiting.add(id);
+    stack.push(id);
+    for (const dependency of graph.get(id) ?? []) {
+      const cycle = visit(dependency);
+      if (cycle) {
+        return cycle;
+      }
+    }
+    stack.pop();
+    visiting.delete(id);
+    visited.add(id);
+    return null;
+  };
+
+  for (const step of workflow.steps) {
+    const cycle = visit(step.id);
+    if (cycle) {
+      return cycle;
+    }
+  }
+  return [];
 }
 
 function ImportJsonDialog({
