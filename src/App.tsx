@@ -345,9 +345,29 @@ function App() {
     setStatus("Workflow preset loaded");
   };
 
-  const addWorkflowStep = (kind: WorkflowStepKind) => {
+  const addWorkflowStep = (kind: WorkflowStepKind, options: { afterStepId?: string; connect?: boolean } = {}) => {
     const step = createWorkflowStep(kind);
-    setWorkflow((current) => ({ ...current, steps: [...current.steps, step] }));
+    setWorkflow((current) => {
+      const sourceIndex = options.afterStepId
+        ? current.steps.findIndex((candidate) => candidate.id === options.afterStepId)
+        : -1;
+      const nextStep =
+        sourceIndex >= 0 && options.connect
+          ? { ...step, needs: [...new Set([...step.needs, current.steps[sourceIndex].id])] }
+          : step;
+      const steps =
+        sourceIndex >= 0
+          ? [...current.steps.slice(0, sourceIndex + 1), nextStep, ...current.steps.slice(sourceIndex + 1)]
+          : [...current.steps, nextStep];
+      const sourcePosition = options.afterStepId ? current.graph?.positions?.[options.afterStepId] : undefined;
+      const positions = {
+        ...(current.graph?.positions ?? {}),
+        [nextStep.id]: sourcePosition
+          ? { x: sourcePosition.x + 310, y: sourcePosition.y }
+          : createWorkflowGraphPositions({ ...current, steps })[nextStep.id],
+      };
+      return { ...current, steps, graph: { ...(current.graph ?? { positions: {} }), positions } };
+    });
     setSelectedWorkflowStepId(step.id);
     setStatus("Workflow step added");
   };
@@ -412,6 +432,11 @@ function App() {
       [steps[index], steps[target]] = [steps[target], steps[index]];
       return { ...current, steps };
     });
+  };
+
+  const resetWorkflowLayout = () => {
+    setWorkflow((current) => ({ ...current, graph: { positions: createWorkflowGraphPositions(current) } }));
+    setStatus("Workflow graph layout reset");
   };
 
   const copyWorkflowYaml = async () => {
@@ -623,6 +648,7 @@ function App() {
                 onDeleteStep={deleteWorkflowStep}
                 onDuplicateStep={duplicateWorkflowStep}
                 onMoveStep={moveWorkflowStep}
+                onResetLayout={resetWorkflowLayout}
                 onSelectStep={setSelectedWorkflowStepId}
                 onUpdateStep={updateWorkflowStep}
                 onUpdateWorkflow={updateWorkflow}
@@ -880,6 +906,7 @@ function WorkflowCanvas({
   onDeleteStep,
   onDuplicateStep,
   onMoveStep,
+  onResetLayout,
   onSelectStep,
   onUpdateStep,
   onUpdateWorkflow,
@@ -889,16 +916,18 @@ function WorkflowCanvas({
   workflow: WorkflowModel;
   selectedStepId: string | null;
   onApplyTemplate: (workflow: WorkflowModel) => void;
-  onAddStep: (kind: WorkflowStepKind) => void;
+  onAddStep: (kind: WorkflowStepKind, options?: { afterStepId?: string; connect?: boolean }) => void;
   onDeleteStep: (id: string) => void;
   onDuplicateStep: (id: string) => void;
   onMoveStep: (id: string, direction: -1 | 1) => void;
+  onResetLayout: () => void;
   onSelectStep: (id: string) => void;
   onUpdateStep: (id: string, patch: Partial<WorkflowStep>) => void;
   onUpdateWorkflow: (patch: Partial<WorkflowModel>) => void;
 }) {
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const nodePositions = workflow.graph?.positions ?? {};
+  const selectedStep = workflow.steps.find((step) => step.id === selectedStepId) ?? null;
   const { edges, nodes } = useMemo(
     () =>
       buildWorkflowFlowElements(workflow, executionPlan, issueMap, selectedStepId, nodePositions, {
@@ -909,7 +938,11 @@ function WorkflowCanvas({
   );
   const onNodesChange = useCallback(
     (changes: NodeChange<WorkflowFlowNode>[]) => {
-      const changedNodes = applyNodeChanges(changes, nodes);
+      const positionChanges = changes.filter((change) => change.type === "position" && change.position);
+      if (positionChanges.length === 0) {
+        return;
+      }
+      const changedNodes = applyNodeChanges(positionChanges, nodes);
       const nextPositions = { ...nodePositions };
       for (const node of changedNodes) {
         nextPositions[node.id] = node.position;
@@ -1009,6 +1042,46 @@ function WorkflowCanvas({
             <p className="text-[11px] text-slate-500">Connect nodes to create dependencies. Pan, zoom, and inspect flow shape.</p>
           </div>
           <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-semibold">
+            {selectedStep ? (
+              <>
+                <button
+                  className="inline-flex items-center gap-1 rounded bg-white px-2 py-1 text-slate-700 ring-1 ring-slate-200 hover:bg-slate-50"
+                  title="Add run step after the selected node"
+                  type="button"
+                  onClick={() => onAddStep("run", { afterStepId: selectedStep.id, connect: true })}
+                >
+                  <Plus size={12} aria-hidden="true" />
+                  Run after
+                </button>
+                <button
+                  className="inline-flex items-center gap-1 rounded bg-white px-2 py-1 text-slate-700 ring-1 ring-slate-200 hover:bg-slate-50"
+                  title="Add action step after the selected node"
+                  type="button"
+                  onClick={() => onAddStep("uses", { afterStepId: selectedStep.id, connect: true })}
+                >
+                  <ArrowRight size={12} aria-hidden="true" />
+                  Uses after
+                </button>
+                <button
+                  className="inline-flex items-center gap-1 rounded bg-white px-2 py-1 text-slate-700 ring-1 ring-slate-200 hover:bg-slate-50"
+                  title="Add approval gate after the selected node"
+                  type="button"
+                  onClick={() => onAddStep("approval", { afterStepId: selectedStep.id, connect: true })}
+                >
+                  <ListChecks size={12} aria-hidden="true" />
+                  Gate after
+                </button>
+              </>
+            ) : null}
+            <button
+              className="inline-flex items-center gap-1 rounded bg-white px-2 py-1 text-slate-700 ring-1 ring-slate-200 hover:bg-slate-50"
+              title="Reset workflow graph layout"
+              type="button"
+              onClick={onResetLayout}
+            >
+              <Rows3 size={12} aria-hidden="true" />
+              Layout
+            </button>
             {selectedEdgeId ? (
               <button
                 className="rounded bg-red-50 px-2 py-1 text-red-700 ring-1 ring-red-200 hover:bg-red-100"
@@ -1055,6 +1128,14 @@ function WorkflowCanvas({
               nodeBorderRadius={8}
               nodeColor={(node) => (node.data?.blocked ? "#fecaca" : node.selected ? "#0f172a" : "#cbd5e1")}
             />
+            {nodes.length === 0 ? (
+              <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center p-6">
+                <div className="rounded-md border border-dashed border-slate-200 bg-white/95 px-4 py-3 text-center shadow-sm">
+                  <p className="text-sm font-semibold text-slate-800">No workflow steps yet</p>
+                  <p className="mt-1 text-xs text-slate-500">Add a run, action, or approval gate to start the graph.</p>
+                </div>
+              </div>
+            ) : null}
           </ReactFlow>
         </div>
       </div>
@@ -2589,7 +2670,7 @@ function buildWorkflowFlowElements(
   },
 ): { nodes: WorkflowFlowNode[]; edges: FlowEdge[] } {
   const depthMap = workflowDepthMap(workflow);
-  const rowMap = new Map(workflow.steps.map((step, index) => [step.id, index]));
+  const layoutPositions = createWorkflowGraphPositions(workflow);
   const orderMap = new Map(executionPlan.orderedStepIds.map((id, index) => [id, index + 1]));
   const blocked = new Set(executionPlan.blockedStepIds);
   const ids = new Set(workflow.steps.map((step) => step.id));
@@ -2608,10 +2689,7 @@ function buildWorkflowFlowElements(
         { type: "target", position: Position.Left, x: 0, y: 56, width: 10, height: 10 },
         { type: "source", position: Position.Right, x: 250, y: 56, width: 10, height: 10 },
       ],
-      position: nodePositions[step.id] ?? {
-        x: 40 + depth * 310,
-        y: 40 + (rowMap.get(step.id) ?? index) * 145,
-      },
+      position: nodePositions[step.id] ?? layoutPositions[step.id] ?? { x: 40 + depth * 310, y: 40 + index * 145 },
       selected: step.id === selectedStepId,
       data: {
         step,
@@ -2642,6 +2720,21 @@ function buildWorkflowFlowElements(
       })),
   );
   return { nodes, edges };
+}
+
+function createWorkflowGraphPositions(workflow: WorkflowModel) {
+  const depthMap = workflowDepthMap(workflow);
+  const depthRows = new Map<number, number>();
+  return workflow.steps.reduce<Record<string, { x: number; y: number }>>((positions, step) => {
+    const depth = depthMap.get(step.id) ?? 0;
+    const row = depthRows.get(depth) ?? 0;
+    depthRows.set(depth, row + 1);
+    positions[step.id] = {
+      x: 40 + depth * 310,
+      y: 40 + row * 145,
+    };
+    return positions;
+  }, {});
 }
 
 function workflowDepthMap(workflow: WorkflowModel) {
