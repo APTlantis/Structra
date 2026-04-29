@@ -65,7 +65,7 @@ export type WorkflowStepKind = "run" | "uses" | "approval";
 
 export type WorkflowExportTarget = "portable" | "github-actions" | "gitlab-ci";
 
-export type WorkflowImportSource = "portable" | "github-actions";
+export type WorkflowImportSource = WorkflowExportTarget;
 
 export interface WorkflowStep {
   id: string;
@@ -90,6 +90,16 @@ export interface WorkflowImportResult {
   workflow: WorkflowModel;
   source: WorkflowImportSource;
   warnings: string[];
+}
+
+export interface WorkflowExecutionPlan {
+  orderedStepIds: string[];
+  blockedStepIds: string[];
+  cycles: string[][];
+  missingDependencies: Array<{
+    stepId: string;
+    dependency: string;
+  }>;
 }
 
 export interface WorkflowTemplate {

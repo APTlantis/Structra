@@ -1,5 +1,6 @@
 import type {
   ValidationReport,
+  WorkflowExecutionPlan,
   WorkflowExportTarget,
   WorkflowImportResult,
   WorkflowModel,
@@ -272,6 +273,10 @@ export function importWorkflowYaml(text: string): WorkflowImportResult {
     };
   }
 
+  if (isGitlabCiWorkflow(parsed)) {
+    return fromGitlabCiWorkflow(parsed);
+  }
+
   return fromGithubActionsWorkflow(parsed);
 }
 
@@ -324,9 +329,9 @@ export function validateWorkflow(workflow: WorkflowModel, target: WorkflowExport
     }
   }
 
-  const cycle = findWorkflowCycle(workflow);
-  if (cycle.length > 0) {
-    errors.push(`Workflow has a circular dependency: ${cycle.join(" -> ")}.`);
+  const plan = buildWorkflowExecutionPlan(workflow);
+  if (plan.cycles.length > 0) {
+    errors.push(`Workflow has a circular dependency: ${plan.cycles[0].join(" -> ")}.`);
   }
 
   duplicateNames.forEach((name) => warnings.push(`Duplicate step name: ${name}.`));
@@ -355,43 +360,99 @@ export function validateWorkflow(workflow: WorkflowModel, target: WorkflowExport
   };
 }
 
-function findWorkflowCycle(workflow: WorkflowModel) {
+export function buildWorkflowExecutionPlan(workflow: WorkflowModel): WorkflowExecutionPlan {
+  const ids = new Set(workflow.steps.map((step) => step.id));
+  const missingDependencies = workflow.steps.flatMap((step) =>
+    step.needs
+      .filter((dependency) => !ids.has(dependency))
+      .map((dependency) => ({
+        stepId: step.id,
+        dependency,
+      })),
+  );
+  const cycles = findWorkflowCycles(workflow);
+  const blockedByCycle = new Set(cycles.flat());
+  const blockedByMissingDependency = new Set(missingDependencies.map((missing) => missing.stepId));
+  const remaining = new Map(workflow.steps.map((step) => [step.id, new Set(step.needs.filter((dependency) => ids.has(dependency)))]));
+  const orderedStepIds: string[] = [];
+  let progressed = true;
+
+  while (progressed) {
+    progressed = false;
+    for (const step of workflow.steps) {
+      const dependencies = remaining.get(step.id);
+      if (
+        !dependencies ||
+        dependencies.size > 0 ||
+        orderedStepIds.includes(step.id) ||
+        blockedByCycle.has(step.id) ||
+        blockedByMissingDependency.has(step.id)
+      ) {
+        continue;
+      }
+      orderedStepIds.push(step.id);
+      remaining.delete(step.id);
+      for (const nextDependencies of remaining.values()) {
+        nextDependencies.delete(step.id);
+      }
+      progressed = true;
+    }
+  }
+
+  return {
+    orderedStepIds,
+    blockedStepIds: workflow.steps
+      .map((step) => step.id)
+      .filter((id) => !orderedStepIds.includes(id) || missingDependencies.some((missing) => missing.stepId === id)),
+    cycles,
+    missingDependencies,
+  };
+}
+
+function findWorkflowCycles(workflow: WorkflowModel) {
   const ids = new Set(workflow.steps.map((step) => step.id));
   const graph = new Map(workflow.steps.map((step) => [step.id, step.needs.filter((dependency) => ids.has(dependency))]));
   const visiting = new Set<string>();
   const visited = new Set<string>();
   const stack: string[] = [];
+  const cycles: string[][] = [];
 
-  const visit = (id: string): string[] | null => {
+  const visit = (id: string) => {
     if (visiting.has(id)) {
       const start = stack.indexOf(id);
-      return [...stack.slice(start), id];
+      cycles.push([...stack.slice(start), id]);
+      return;
     }
     if (visited.has(id)) {
-      return null;
+      return;
     }
 
     visiting.add(id);
     stack.push(id);
     for (const dependency of graph.get(id) ?? []) {
-      const cycle = visit(dependency);
-      if (cycle) {
-        return cycle;
-      }
+      visit(dependency);
     }
     stack.pop();
     visiting.delete(id);
     visited.add(id);
-    return null;
   };
 
   for (const step of workflow.steps) {
-    const cycle = visit(step.id);
-    if (cycle) {
-      return cycle;
-    }
+    visit(step.id);
   }
-  return [];
+  return dedupeCycles(cycles);
+}
+
+function dedupeCycles(cycles: string[][]) {
+  const seen = new Set<string>();
+  return cycles.filter((cycle) => {
+    const key = [...new Set(cycle)].sort().join("|");
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 function portableWorkflowToYaml(workflow: WorkflowModel) {
@@ -533,6 +594,48 @@ function fromGithubActionsWorkflow(value: Record<string, unknown>): WorkflowImpo
   };
 }
 
+function fromGitlabCiWorkflow(value: Record<string, unknown>): WorkflowImportResult {
+  const warnings: string[] = [];
+  const reservedKeys = new Set(["stages", "variables", "workflow", "default", "include", "image", "services", "before_script", "after_script", "cache"]);
+  const jobs = Object.entries(value).filter((entry): entry is [string, Record<string, unknown>] => {
+    const [key, job] = entry;
+    return !reservedKeys.has(key) && isRecord(job) && (job.script !== undefined || job.stage !== undefined || job.needs !== undefined);
+  });
+  if (jobs.length === 0) {
+    throw new Error("GitLab CI workflow must contain at least one job.");
+  }
+
+  const usedIds = new Set<string>();
+  const jobIdMap = new Map<string, string>();
+  for (const [jobName] of jobs) {
+    jobIdMap.set(jobName, uniqueStepId(jobName, jobIdMap.size, usedIds));
+  }
+
+  const steps = jobs.map(([jobName, job], index) => gitlabStep(jobName, job, index, jobIdMap));
+  const firstTaggedJob = jobs.find(([, job]) => Array.isArray(job.tags) && job.tags.length > 0)?.[1];
+  const globalTags = isRecord(value.default) && Array.isArray(value.default.tags) ? value.default.tags : [];
+
+  if (jobs.some(([, job]) => job.image !== undefined)) {
+    warnings.push("GitLab job images are not modeled yet and were not imported.");
+  }
+  if (jobs.some(([, job]) => job.rules !== undefined || job.only !== undefined || job.except !== undefined)) {
+    warnings.push("GitLab job rules/only/except are not modeled yet and were not imported.");
+  }
+
+  return {
+    source: "gitlab-ci",
+    warnings,
+    workflow: {
+      version: initialWorkflow.version,
+      name: "Imported GitLab CI Pipeline",
+      trigger: "push",
+      schedule: initialWorkflow.schedule,
+      runsOn: firstString(Array.isArray(firstTaggedJob?.tags) ? firstTaggedJob.tags : globalTags, initialWorkflow.runsOn),
+      steps,
+    },
+  };
+}
+
 function portableStep(value: unknown, index: number, usedIds: Set<string>): WorkflowStep {
   const step = isRecord(value) ? value : {};
   const kind = isWorkflowStepKind(step.type) ? step.type : isWorkflowStepKind(step.kind) ? step.kind : step.uses ? "uses" : "run";
@@ -563,6 +666,68 @@ function githubStep(value: unknown, index: number, usedIds: Set<string>): Workfl
   };
 }
 
+function gitlabStep(jobName: string, job: Record<string, unknown>, index: number, jobIdMap: Map<string, string>): WorkflowStep {
+  const script = gitlabScriptToCommand(job.script);
+  const actionRef = actionReferenceFromScript(script);
+  const isManual = job.when === "manual";
+  return {
+    id: jobIdMap.get(jobName) ?? uniqueStepId(jobName, index, new Set(jobIdMap.values())),
+    name: titleFromIdentifier(jobName),
+    kind: isManual ? "approval" : actionRef ? "uses" : "run",
+    command: isManual ? script || "Manual approval required." : actionRef ? "" : script,
+    uses: actionRef ?? "",
+    needs: gitlabNeeds(job.needs, jobIdMap),
+    env: mergeStringRecords(job.variables, {}),
+  };
+}
+
+function gitlabScriptToCommand(value: unknown) {
+  if (Array.isArray(value)) {
+    return value.map((line) => String(line)).join("\n");
+  }
+  return typeof value === "string" ? value : "";
+}
+
+function actionReferenceFromScript(script: string) {
+  const match = script.match(/Action reference:\s*([^"'\n]+)/);
+  return match?.[1]?.trim() || null;
+}
+
+function gitlabNeeds(value: unknown, jobIdMap: Map<string, string>) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => {
+      if (typeof item === "string") {
+        return jobIdMap.get(item);
+      }
+      if (isRecord(item) && typeof item.job === "string") {
+        return jobIdMap.get(item.job);
+      }
+      return null;
+    })
+    .filter((item): item is string => Boolean(item));
+}
+
+function mergeStringRecords(value: unknown, fallback: Record<string, string>) {
+  return isStringRecord(value) ? value : fallback;
+}
+
+function firstString(value: unknown[], fallback: string) {
+  const first = value.find((item): item is string => typeof item === "string" && item.trim().length > 0);
+  return first ?? fallback;
+}
+
+function titleFromIdentifier(value: string) {
+  return value
+    .replace(/^step[_-]/, "")
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(" ") || "Step";
+}
+
 function normalizePortableTrigger(value: unknown): { trigger: WorkflowTrigger; schedule: string } {
   if (isRecord(value) && value.type === "schedule") {
     return { trigger: "schedule", schedule: readString(value.cron, initialWorkflow.schedule) };
@@ -587,6 +752,13 @@ function normalizeGithubTrigger(value: unknown): { trigger: WorkflowTrigger; sch
     }
   }
   return { trigger: "manual", schedule: initialWorkflow.schedule };
+}
+
+function isGitlabCiWorkflow(value: Record<string, unknown>) {
+  if (Array.isArray(value.stages)) {
+    return true;
+  }
+  return Object.entries(value).some(([key, item]) => key !== "jobs" && isRecord(item) && (item.script !== undefined || item.stage !== undefined));
 }
 
 function parseYamlLike(text: string): unknown {

@@ -33,6 +33,7 @@ import { buildInternalNodes, createProjectFile, readProjectFile } from "./intern
 import { generateOutput, validateDocument } from "./transformClient";
 import { selectNodeById, useBuilderStore } from "./store";
 import {
+  buildWorkflowExecutionPlan,
   createWorkflowStep,
   envFromText,
   envToText,
@@ -55,6 +56,7 @@ import type {
   NodeType,
   OutputMode,
   ValidationReport,
+  WorkflowExecutionPlan,
   WorkflowExportTarget,
   WorkflowModel,
   WorkflowStep,
@@ -144,6 +146,7 @@ function App() {
   const workflowYaml = useMemo(() => workflowToYaml(workflow, workflowTarget), [workflow, workflowTarget]);
   const workflowValidation = useMemo(() => validateWorkflow(workflow, workflowTarget), [workflow, workflowTarget]);
   const workflowIssueMap = useMemo(() => workflowStepIssueMap(workflow), [workflow]);
+  const workflowExecutionPlan = useMemo(() => buildWorkflowExecutionPlan(workflow), [workflow]);
 
   useEffect(() => {
     documentElement().classList.toggle("dark", theme === "dark");
@@ -288,10 +291,12 @@ function App() {
       setWorkflowTarget(result.source);
       setSelectedWorkflowStepId(result.workflow.steps[0]?.id ?? null);
       setCanvasView("workflow");
+      const sourceLabel =
+        result.source === "github-actions" ? "GitHub Actions" : result.source === "gitlab-ci" ? "GitLab CI" : "Workflow";
       setStatus(
         result.warnings.length > 0
-          ? `${result.source === "github-actions" ? "GitHub Actions" : "Workflow"} imported with warnings`
-          : `${result.source === "github-actions" ? "GitHub Actions" : "Workflow"} imported`,
+          ? `${sourceLabel} imported with warnings`
+          : `${sourceLabel} imported`,
       );
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Invalid workflow YAML");
@@ -327,10 +332,32 @@ function App() {
   const deleteWorkflowStep = (id: string) => {
     setWorkflow((current) => {
       const steps = current.steps.filter((step) => step.id !== id);
+      const cleanedSteps = steps.map((step) => ({ ...step, needs: step.needs.filter((dependency) => dependency !== id) }));
       setSelectedWorkflowStepId(steps[0]?.id ?? null);
-      return { ...current, steps };
+      return { ...current, steps: cleanedSteps };
     });
     setStatus("Workflow step deleted");
+  };
+
+  const duplicateWorkflowStep = (id: string) => {
+    setWorkflow((current) => {
+      const index = current.steps.findIndex((step) => step.id === id);
+      if (index < 0) {
+        return current;
+      }
+      const source = current.steps[index];
+      const clone = {
+        ...source,
+        id: createWorkflowStepId(source.name, current.steps),
+        name: `${source.name} Copy`,
+        env: { ...source.env },
+        needs: [...source.needs],
+      };
+      const steps = [...current.steps.slice(0, index + 1), clone, ...current.steps.slice(index + 1)];
+      setSelectedWorkflowStepId(clone.id);
+      return { ...current, steps };
+    });
+    setStatus("Workflow step duplicated");
   };
 
   const moveWorkflowStep = (id: string, direction: -1 | 1) => {
@@ -546,12 +573,14 @@ function App() {
               <StructureView data={generated?.data ?? {}} internalNodes={internalNodes} mode={outputMode} />
             ) : (
               <WorkflowCanvas
+                executionPlan={workflowExecutionPlan}
                 issueMap={workflowIssueMap}
                 workflow={workflow}
                 selectedStepId={selectedWorkflowStepId}
                 onApplyTemplate={applyWorkflowTemplate}
                 onAddStep={addWorkflowStep}
                 onDeleteStep={deleteWorkflowStep}
+                onDuplicateStep={duplicateWorkflowStep}
                 onMoveStep={moveWorkflowStep}
                 onSelectStep={setSelectedWorkflowStepId}
                 onUpdateStep={updateWorkflowStep}
@@ -565,6 +594,7 @@ function App() {
             {canvasView === "workflow" ? (
               <>
                 <WorkflowInspector
+                  executionPlan={workflowExecutionPlan}
                   selectedStep={selectedWorkflowStep}
                   workflow={workflow}
                   issueMap={workflowIssueMap}
@@ -729,22 +759,26 @@ function EmptyCanvas() {
 }
 
 function WorkflowCanvas({
+  executionPlan,
   issueMap,
   workflow,
   selectedStepId,
   onApplyTemplate,
   onAddStep,
   onDeleteStep,
+  onDuplicateStep,
   onMoveStep,
   onSelectStep,
   onUpdateStep,
 }: {
+  executionPlan: WorkflowExecutionPlan;
   issueMap: Map<string, WorkflowStepIssueSummary>;
   workflow: WorkflowModel;
   selectedStepId: string | null;
   onApplyTemplate: (workflow: WorkflowModel) => void;
   onAddStep: (kind: WorkflowStepKind) => void;
   onDeleteStep: (id: string) => void;
+  onDuplicateStep: (id: string) => void;
   onMoveStep: (id: string, direction: -1 | 1) => void;
   onSelectStep: (id: string) => void;
   onUpdateStep: (id: string, patch: Partial<WorkflowStep>) => void;
@@ -802,7 +836,13 @@ function WorkflowCanvas({
           ))}
         </div>
       </div>
-      <WorkflowDependencyMap issueMap={issueMap} selectedStepId={selectedStepId} workflow={workflow} onSelectStep={onSelectStep} />
+      <WorkflowDependencyMap
+        executionPlan={executionPlan}
+        issueMap={issueMap}
+        selectedStepId={selectedStepId}
+        workflow={workflow}
+        onSelectStep={onSelectStep}
+      />
       <div className="grid gap-3 p-4">
         {workflow.steps.map((step, index) => (
           <WorkflowStepCard
@@ -812,6 +852,7 @@ function WorkflowCanvas({
             selected={step.id === selectedStepId}
             step={step}
             onDelete={onDeleteStep}
+            onDuplicate={onDuplicateStep}
             onMove={onMoveStep}
             onSelect={onSelectStep}
             onUpdate={onUpdateStep}
@@ -828,6 +869,7 @@ function WorkflowStepCard({
   selected,
   step,
   onDelete,
+  onDuplicate,
   onMove,
   onSelect,
   onUpdate,
@@ -837,6 +879,7 @@ function WorkflowStepCard({
   selected: boolean;
   step: WorkflowStep;
   onDelete: (id: string) => void;
+  onDuplicate: (id: string) => void;
   onMove: (id: string, direction: -1 | 1) => void;
   onSelect: (id: string) => void;
   onUpdate: (id: string, patch: Partial<WorkflowStep>) => void;
@@ -887,6 +930,7 @@ function WorkflowStepCard({
         <div className="flex shrink-0 items-center gap-1">
           <IconButton label="Move up" icon={ArrowUp} onClick={() => onMove(step.id, -1)} />
           <IconButton label="Move down" icon={ArrowDown} onClick={() => onMove(step.id, 1)} />
+          <IconButton label="Duplicate" icon={Copy} onClick={() => onDuplicate(step.id)} />
           <IconButton label="Delete" icon={Trash2} onClick={() => onDelete(step.id)} />
         </div>
       </div>
@@ -931,11 +975,13 @@ function WorkflowStepCard({
 }
 
 function WorkflowDependencyMap({
+  executionPlan,
   issueMap,
   selectedStepId,
   workflow,
   onSelectStep,
 }: {
+  executionPlan: WorkflowExecutionPlan;
   issueMap: Map<string, WorkflowStepIssueSummary>;
   selectedStepId: string | null;
   workflow: WorkflowModel;
@@ -1025,6 +1071,51 @@ function WorkflowDependencyMap({
             )}
           </div>
         </div>
+      </div>
+      <div className="mt-3 rounded-md border border-slate-200 bg-white p-3">
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <div className="text-xs font-semibold text-slate-700">Execution Order</div>
+          {executionPlan.blockedStepIds.length > 0 ? (
+            <span className="rounded bg-red-50 px-2 py-0.5 text-[10px] font-semibold text-red-700">
+              {executionPlan.blockedStepIds.length} blocked
+            </span>
+          ) : (
+            <span className="rounded bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">ready</span>
+          )}
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {executionPlan.orderedStepIds.length > 0 ? (
+            executionPlan.orderedStepIds.map((id, index) => (
+              <button
+                key={id}
+                className={`inline-flex items-center gap-1 rounded px-2 py-1 font-mono text-[11px] ${
+                  id === selectedStepId ? "bg-slate-950 text-white" : "bg-slate-50 text-slate-600 hover:bg-slate-100"
+                }`}
+                type="button"
+                onClick={() => onSelectStep(id)}
+              >
+                <span className="font-sans text-[10px] font-semibold">{index + 1}</span>
+                {id}
+              </button>
+            ))
+          ) : (
+            <span className="rounded bg-red-50 px-2 py-1 text-[11px] text-red-700">No executable order available.</span>
+          )}
+        </div>
+        {executionPlan.blockedStepIds.length > 0 ? (
+          <div className="mt-2 flex flex-wrap gap-1.5 border-t border-slate-100 pt-2">
+            {executionPlan.blockedStepIds.map((id) => (
+              <button
+                key={id}
+                className="rounded bg-red-50 px-2 py-1 font-mono text-[11px] text-red-700 hover:bg-red-100"
+                type="button"
+                onClick={() => onSelectStep(id)}
+              >
+                {id}
+              </button>
+            ))}
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -1703,6 +1794,7 @@ function StructureTree({ data, internalNodes }: { data: JsonValue; internalNodes
 }
 
 function WorkflowInspector({
+  executionPlan,
   issueMap,
   selectedStep,
   workflow,
@@ -1710,6 +1802,7 @@ function WorkflowInspector({
   onUpdateStep,
   onUpdateWorkflow,
 }: {
+  executionPlan: WorkflowExecutionPlan;
   issueMap: Map<string, WorkflowStepIssueSummary>;
   selectedStep: WorkflowStep | null;
   workflow: WorkflowModel;
@@ -1792,6 +1885,7 @@ function WorkflowInspector({
               }
             />
             <WorkflowDependencyPicker
+              executionPlan={executionPlan}
               issue={issueMap.get(selectedStep.id)}
               selectedStep={selectedStep}
               steps={workflow.steps}
@@ -1812,11 +1906,13 @@ function WorkflowInspector({
 }
 
 function WorkflowDependencyPicker({
+  executionPlan,
   issue,
   selectedStep,
   steps,
   onChange,
 }: {
+  executionPlan: WorkflowExecutionPlan;
   issue?: WorkflowStepIssueSummary;
   selectedStep: WorkflowStep;
   steps: WorkflowStep[];
@@ -1839,20 +1935,29 @@ function WorkflowDependencyPicker({
         {candidates.length > 0 ? (
           candidates.map((step) => {
             const selected = needs.has(step.id);
+            const createsCycle = !selected && dependencyWouldCreateCycle(selectedStep.id, step.id, steps);
             return (
               <button
                 key={step.id}
-                className={`flex min-w-0 items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-left text-xs ${
+                className={`flex min-w-0 items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-left text-xs disabled:cursor-not-allowed disabled:opacity-55 ${
                   selected
                     ? "border-slate-950 bg-slate-950 text-white"
+                    : createsCycle
+                      ? "border-red-200 bg-red-50 text-red-700"
                     : "border-slate-200 bg-white text-slate-700 hover:border-slate-400 hover:bg-slate-50"
                 }`}
+                disabled={createsCycle}
+                title={createsCycle ? "This dependency would create a circular workflow." : undefined}
                 type="button"
                 onClick={() => toggleDependency(step.id)}
               >
                 <span className="truncate font-mono">{step.id}</span>
-                <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${selected ? "bg-white/15" : "bg-slate-100 text-slate-500"}`}>
-                  {selected ? "needed" : step.kind}
+                <span
+                  className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${
+                    selected ? "bg-white/15" : createsCycle ? "bg-white text-red-700" : "bg-slate-100 text-slate-500"
+                  }`}
+                >
+                  {selected ? "needed" : createsCycle ? "cycle" : step.kind}
                 </span>
               </button>
             );
@@ -1863,6 +1968,11 @@ function WorkflowDependencyPicker({
       </div>
       {issue && issue.errors.length > 0 ? (
         <div className="rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-800">{issue.errors.slice(0, 2).join(" ")}</div>
+      ) : null}
+      {executionPlan.cycles.length > 0 ? (
+        <div className="rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-800">
+          Circular dependency: {executionPlan.cycles[0].join(" -> ")}.
+        </div>
       ) : null}
     </div>
   );
@@ -2200,6 +2310,33 @@ function workflowStepIssueMap(workflow: WorkflowModel) {
   }
 
   return issues;
+}
+
+function createWorkflowStepId(name: string, steps: WorkflowStep[]) {
+  const usedIds = new Set(steps.map((step) => step.id));
+  const base = `step-${slugify(name || "step")}`;
+  let candidate = base;
+  let index = 2;
+  while (usedIds.has(candidate)) {
+    candidate = `${base}-${index}`;
+    index += 1;
+  }
+  return candidate;
+}
+
+function dependencyWouldCreateCycle(stepId: string, dependencyId: string, steps: WorkflowStep[]) {
+  const graph = new Map(steps.map((step) => [step.id, step.id === stepId ? [...step.needs, dependencyId] : step.needs]));
+  const visit = (id: string, seen: Set<string>): boolean => {
+    if (id === stepId && seen.size > 0) {
+      return true;
+    }
+    if (seen.has(id)) {
+      return false;
+    }
+    seen.add(id);
+    return (graph.get(id) ?? []).some((dependency) => visit(dependency, new Set(seen)));
+  };
+  return visit(dependencyId, new Set());
 }
 
 function findWorkflowCycle(workflow: WorkflowModel) {
