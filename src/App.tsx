@@ -1,4 +1,21 @@
 import {
+  Background,
+  ConnectionMode,
+  Controls,
+  Handle,
+  MarkerType,
+  MiniMap,
+  Position,
+  ReactFlow,
+  applyNodeChanges,
+  type Connection,
+  type Edge as FlowEdge,
+  type Node as FlowNode,
+  type NodeChange,
+  type NodeProps,
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import {
   ArrowDown,
   ArrowRight,
   ArrowUp,
@@ -26,7 +43,7 @@ import {
   Trash2,
   Undo2,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DragEvent, ReactNode } from "react";
 import { createDocumentFromJson, createDocumentFromJsonSchema, templateDocuments } from "./documentFactory";
 import { buildInternalNodes, createProjectFile, readProjectFile } from "./internalModel";
@@ -98,6 +115,20 @@ const viewLabels: Record<CanvasView, string> = {
 
 const savedTemplateKey = "sdb.savedTemplates.v1";
 const themeKey = "sdb.theme.v1";
+const workflowNodeTypes = {
+  workflowStep: WorkflowFlowNodeCard,
+};
+
+interface WorkflowFlowNodeData extends Record<string, unknown> {
+  step: WorkflowStep;
+  index: number;
+  selected: boolean;
+  issue?: WorkflowStepIssueSummary;
+  orderIndex: number | null;
+  blocked: boolean;
+}
+
+type WorkflowFlowNode = FlowNode<WorkflowFlowNodeData, "workflowStep">;
 
 function App() {
   const document = useBuilderStore((state) => state.document);
@@ -758,6 +789,50 @@ function EmptyCanvas() {
   );
 }
 
+function WorkflowFlowNodeCard({ data }: NodeProps<WorkflowFlowNode>) {
+  const hasErrors = Boolean(data.issue?.errors.length);
+  const hasWarnings = Boolean(data.issue?.warnings.length);
+  return (
+    <div
+      className={`min-w-[230px] rounded-md border bg-white shadow-sm ${
+        data.selected
+          ? "border-slate-950 ring-2 ring-slate-200"
+          : hasErrors
+            ? "border-red-300"
+            : hasWarnings
+              ? "border-amber-300"
+              : "border-slate-200"
+      }`}
+    >
+      <Handle className="!size-2.5 !border-2 !border-white !bg-slate-500" position={Position.Left} type="target" />
+      <Handle className="!size-2.5 !border-2 !border-white !bg-slate-950" position={Position.Right} type="source" />
+      <div className="border-b border-slate-100 px-3 py-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="truncate text-sm font-semibold text-slate-900">{data.step.name || data.step.id}</span>
+          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">{data.step.kind}</span>
+        </div>
+        <div className="mt-1 flex min-w-0 items-center gap-1 font-mono text-[11px] text-slate-500">
+          <span className="truncate">{data.step.id}</span>
+          {data.orderIndex ? <span className="rounded bg-emerald-50 px-1 text-emerald-700">#{data.orderIndex}</span> : null}
+          {data.blocked ? <span className="rounded bg-red-50 px-1 text-red-700">blocked</span> : null}
+        </div>
+      </div>
+      <div className="grid gap-1 px-3 py-2 text-[11px] text-slate-600">
+        {data.step.kind === "uses" ? (
+          <span className="truncate font-mono">{data.step.uses || "missing action reference"}</span>
+        ) : (
+          <span className="line-clamp-2 font-mono">{data.step.command || "missing command"}</span>
+        )}
+        {hasErrors || hasWarnings ? (
+          <span className={hasErrors ? "text-red-700" : "text-amber-700"}>
+            {hasErrors ? data.issue?.errors[0] : data.issue?.warnings[0]}
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function WorkflowCanvas({
   executionPlan,
   issueMap,
@@ -783,6 +858,52 @@ function WorkflowCanvas({
   onSelectStep: (id: string) => void;
   onUpdateStep: (id: string, patch: Partial<WorkflowStep>) => void;
 }) {
+  const [nodePositions, setNodePositions] = useState<Record<string, { x: number; y: number }>>({});
+  const { edges, nodes } = useMemo(
+    () => buildWorkflowFlowElements(workflow, executionPlan, issueMap, selectedStepId, nodePositions),
+    [executionPlan, issueMap, nodePositions, selectedStepId, workflow],
+  );
+  const onNodesChange = useCallback(
+    (changes: NodeChange<WorkflowFlowNode>[]) => {
+      const changedNodes = applyNodeChanges(changes, nodes);
+      setNodePositions((current) => {
+        const next = { ...current };
+        for (const node of changedNodes) {
+          next[node.id] = node.position;
+        }
+        return next;
+      });
+    },
+    [nodes],
+  );
+  const onConnect = useCallback(
+    (connection: Connection) => {
+      if (!connection.source || !connection.target || connection.source === connection.target) {
+        return;
+      }
+      const targetStep = workflow.steps.find((step) => step.id === connection.target);
+      if (!targetStep || targetStep.needs.includes(connection.source)) {
+        return;
+      }
+      if (dependencyWouldCreateCycle(connection.target, connection.source, workflow.steps)) {
+        return;
+      }
+      onUpdateStep(targetStep.id, { needs: [...targetStep.needs, connection.source] });
+    },
+    [onUpdateStep, workflow.steps],
+  );
+  const isValidConnection = useCallback(
+    (connection: FlowEdge | Connection) =>
+      Boolean(
+        connection.source &&
+          connection.target &&
+          connection.source !== connection.target &&
+          !workflow.steps.find((step) => step.id === connection.target)?.needs.includes(connection.source) &&
+          !dependencyWouldCreateCycle(connection.target, connection.source, workflow.steps),
+      ),
+    [workflow.steps],
+  );
+
   return (
     <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
@@ -812,6 +933,50 @@ function WorkflowCanvas({
           >
             Gate
           </button>
+        </div>
+      </div>
+      <div className="border-b border-slate-200 bg-slate-50 p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h4 className="text-xs font-semibold text-slate-700">Graph Canvas</h4>
+            <p className="text-[11px] text-slate-500">Connect nodes to create dependencies. Pan, zoom, and inspect flow shape.</p>
+          </div>
+          <div className="flex flex-wrap gap-1.5 text-[11px] font-semibold">
+            <span className="rounded bg-white px-2 py-1 text-slate-600 ring-1 ring-slate-200">{nodes.length} nodes</span>
+            <span className="rounded bg-white px-2 py-1 text-slate-600 ring-1 ring-slate-200">{edges.length} edges</span>
+          </div>
+        </div>
+        <div className="h-[460px] overflow-hidden rounded-md border border-slate-200 bg-white">
+          <ReactFlow
+            colorMode="light"
+            connectionMode={ConnectionMode.Loose}
+            defaultEdgeOptions={{
+              type: "smoothstep",
+              markerEnd: { type: MarkerType.ArrowClosed },
+            }}
+            edges={edges}
+            fitView
+            fitViewOptions={{ padding: 0.18 }}
+            isValidConnection={isValidConnection}
+            nodeTypes={workflowNodeTypes}
+            nodes={nodes}
+            nodesDraggable
+            proOptions={{ hideAttribution: true }}
+            snapGrid={[20, 20]}
+            snapToGrid
+            onConnect={onConnect}
+            onNodeClick={(_, node) => onSelectStep(node.id)}
+            onNodesChange={onNodesChange}
+          >
+            <Background gap={20} color="#e2e8f0" />
+            <Controls position="bottom-left" />
+            <MiniMap
+              pannable
+              zoomable
+              nodeBorderRadius={8}
+              nodeColor={(node) => (node.data?.blocked ? "#fecaca" : node.selected ? "#0f172a" : "#cbd5e1")}
+            />
+          </ReactFlow>
         </div>
       </div>
       <div className="grid gap-2 border-b border-slate-200 bg-white p-4">
@@ -2310,6 +2475,93 @@ function workflowStepIssueMap(workflow: WorkflowModel) {
   }
 
   return issues;
+}
+
+function buildWorkflowFlowElements(
+  workflow: WorkflowModel,
+  executionPlan: WorkflowExecutionPlan,
+  issueMap: Map<string, WorkflowStepIssueSummary>,
+  selectedStepId: string | null,
+  nodePositions: Record<string, { x: number; y: number }>,
+): { nodes: WorkflowFlowNode[]; edges: FlowEdge[] } {
+  const depthMap = workflowDepthMap(workflow);
+  const rowMap = new Map(workflow.steps.map((step, index) => [step.id, index]));
+  const orderMap = new Map(executionPlan.orderedStepIds.map((id, index) => [id, index + 1]));
+  const blocked = new Set(executionPlan.blockedStepIds);
+  const ids = new Set(workflow.steps.map((step) => step.id));
+  const nodes: WorkflowFlowNode[] = workflow.steps.map((step, index) => {
+    const depth = depthMap.get(step.id) ?? 0;
+    return {
+      id: step.id,
+      type: "workflowStep",
+      initialHeight: 122,
+      initialWidth: 260,
+      width: 260,
+      height: 122,
+      sourcePosition: Position.Right,
+      targetPosition: Position.Left,
+      handles: [
+        { type: "target", position: Position.Left, x: 0, y: 56, width: 10, height: 10 },
+        { type: "source", position: Position.Right, x: 250, y: 56, width: 10, height: 10 },
+      ],
+      position: nodePositions[step.id] ?? {
+        x: 40 + depth * 310,
+        y: 40 + (rowMap.get(step.id) ?? index) * 145,
+      },
+      selected: step.id === selectedStepId,
+      data: {
+        step,
+        index,
+        selected: step.id === selectedStepId,
+        issue: issueMap.get(step.id),
+        orderIndex: orderMap.get(step.id) ?? null,
+        blocked: blocked.has(step.id),
+      },
+    };
+  });
+  const edges: FlowEdge[] = workflow.steps.flatMap((step) =>
+    step.needs
+      .filter((dependency) => ids.has(dependency))
+      .map((dependency) => ({
+        id: `edge-${dependency}-${step.id}`,
+        source: dependency,
+        target: step.id,
+        type: "smoothstep",
+        animated: step.id === selectedStepId || dependency === selectedStepId,
+        markerEnd: { type: MarkerType.ArrowClosed },
+        style: {
+          stroke: step.id === selectedStepId || dependency === selectedStepId ? "#0f172a" : "#94a3b8",
+          strokeWidth: step.id === selectedStepId || dependency === selectedStepId ? 2.2 : 1.6,
+        },
+      })),
+  );
+  return { nodes, edges };
+}
+
+function workflowDepthMap(workflow: WorkflowModel) {
+  const ids = new Set(workflow.steps.map((step) => step.id));
+  const byId = new Map(workflow.steps.map((step) => [step.id, step]));
+  const visiting = new Set<string>();
+  const depths = new Map<string, number>();
+
+  const depthFor = (id: string): number => {
+    if (depths.has(id)) {
+      return depths.get(id) ?? 0;
+    }
+    if (visiting.has(id)) {
+      return 0;
+    }
+    visiting.add(id);
+    const step = byId.get(id);
+    const dependencyDepths = step?.needs.filter((dependency) => ids.has(dependency)).map((dependency) => depthFor(dependency)) ?? [];
+    const depth = dependencyDepths.length > 0 ? Math.max(...dependencyDepths) + 1 : 0;
+    visiting.delete(id);
+    depths.set(id, depth);
+    return depth;
+  };
+
+  workflow.steps.forEach((step) => depthFor(step.id));
+  return depths;
 }
 
 function createWorkflowStepId(name: string, steps: WorkflowStep[]) {
