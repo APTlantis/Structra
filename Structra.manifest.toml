@@ -1,0 +1,98 @@
+# Structra Project Manifest
+# Version: 1.0
+# Last Updated: 2026-05-12
+
+[project]
+id = "structra"
+title = "Structra"
+type = "tool"
+stage = "active"
+version = "1.0.0"
+description = "Modular structure and layout visualization tool. Interactive web-based interface for designing and visualizing system architectures and organizational structures."
+tags = ["visualization", "architecture", "layout", "interactive", "web-tool"]
+family = "development-tools"
+canonical_manifest = true
+
+[metadata]
+created = "2026-04-29"
+last_updated = "2026-05-12"
+last_reviewed = "2026-05-12"
+maintainer = "Herb"
+license = "MIT"
+language_primary = "JavaScript"
+languages_used = ["JavaScript", "TypeScript", "React", "HTML", "CSS"]
+
+[state]
+completion_percent = 85
+stability = "mostly-stable"
+active_development = true
+technical_debt = "low"
+maintenance_burden = "medium"
+
+[runtime]
+platform = "web"
+environment = "Node.js, Modern browsers"
+services = []
+storage = ["File system", "Browser storage"]
+
+[capabilities]
+interactive_design = true
+layout_visualization = true
+architecture_planning = true
+export_support = true
+
+[relationships]
+depends_on_projects = []
+used_by_projects = []
+supersedes = []
+superseded_by = []
+external_dependencies = ["Node.js", "React"]
+related_projects = []
+
+[artifacts]
+produces = ["layout-diagrams", "architecture-visualizations"]
+consumes = ["structure-specifications"]
+
+[generation]
+manifest_is_canonical = true
+generates_readme = true
+generates_jsonld = true
+
+[documentation]
+readme = "README.md"
+generated_sections = true
+
+[semantic]
+domain = "visualization"
+primary_concepts = ["structure-visualization", "architecture-design", "layout-planning"]
+related_domains = ["Architecture", "System Design"]
+cognitive_tags = ["visualization-tool", "interactive-design"]
+complexity = "medium"
+
+[visual]
+theme = "NeonInk-v0.1.1"
+primary_color = "#00ff66"
+semantic_role = "tool"
+contains_svg_assets = true
+
+[distribution]
+packaged = true
+package_formats = ["npm", "web"]
+portable = true
+offline_capable = true
+requires_installation = false
+
+[links]
+homepage = "https://aptlantis.net"
+
+[structure]
+repo_path = "D:/zypper/Structra"
+
+[automation]
+build = "pnpm install && pnpm build"
+tasks = ["build", "dev", "test"]
+
+[notes]
+purpose = "Interactive tool for designing and visualizing system structures and architectures"
+technology = "React-based web application with interactive canvas"
+use_case = "Architecture planning and organizational structure visualization"
